@@ -239,76 +239,318 @@ async function setupDatabaseIfNeeded() {
     }
 }
 
-// Import sample data function
+// Import actual data function
 async function importSampleData(client) {
     try {
-        console.log('📊 Importing sample data...');
+        console.log('📊 Importing actual data from files...');
         
-        // Sample CO2 sources data
-        const sampleCO2Sources = [
-            {
-                name: "Reststoff-Heizkraftwerk der LINZ AG",
-                type: "Waste-to-energy plant",
-                total: 250000,
-                fossil: 120000,
-                biogenic: 130000,
-                lat: 48.30639,
-                lng: 14.28611,
-                comment: "Mixed waste-to-energy plant processing municipal waste and sewage sludge"
-            },
-            {
-                name: "WAV Wels waste incinerator",
-                type: "Waste-to-energy plant", 
-                total: 343000,
-                fossil: 185220,
-                biogenic: 157780,
-                lat: 48.16667,
-                lng: 14.03333,
-                comment: "Two-line waste-to-energy plant with household waste processing capacity"
-            },
-            {
-                name: "Reststoffverwertungsanlage Lenzing (RVL)",
-                type: "Waste-to-energy plant",
-                total: 300000,
-                fossil: 180000,
-                biogenic: 120000,
-                lat: 47.9749,
-                lng: 13.6089,
-                comment: "Processes sorted waste materials including packaging and wood waste"
-            }
-        ];
+        // Import CO2 Sources from Excel
+        await importCO2Sources(client);
+        
+        // Import Voting Data from CSV
+        await importVotingData(client);
+        
+        // Import Landfills from CSV
+        await importLandfills(client);
+        
+        // Import Gravel Pits from CSV
+        await importGravelPits(client);
+        
+        // Import Wastewater Plants from CSV
+        await importWastewaterPlants(client);
 
-        for (const source of sampleCO2Sources) {
-            await client.query(`
-                INSERT INTO co2_sources (
-                    plant_name, plant_type, total_co2_t, fossil_co2_t, 
-                    geogenic_co2_t, biogenic_co2_t, comment, geom
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($8, $9), 4326))
-                ON CONFLICT DO NOTHING
-            `, [source.name, source.type, source.total, source.fossil, 0, source.biogenic, source.comment, source.lng, source.lat]);
-        }
-
-        // Sample voting districts
-        const sampleVotingDistricts = [
-            { gkz: 40101, name: "Linz", lat: 48.3069, lng: 14.2858, spo: 28.5, grune: 12.3, kpo: 3.2 },
-            { gkz: 50101, name: "Salzburg", lat: 47.8095, lng: 13.0550, spo: 24.1, grune: 15.7, kpo: 2.8 },
-            { gkz: 40301, name: "Wels", lat: 48.1667, lng: 14.0333, spo: 26.3, grune: 10.5, kpo: 2.1 }
-        ];
-
-        for (const district of sampleVotingDistricts) {
-            const leftGreen = district.spo + district.grune + district.kpo;
-            await client.query(`
-                INSERT INTO voting_districts (
-                    gkz, name, spo_percent, grune_percent, kpo_percent, 
-                    left_green_combined, geom
-                ) VALUES ($1, $2, $3, $4, $5, $6, ST_SetSRID(ST_MakePoint($7, $8), 4326))
-                ON CONFLICT (gkz) DO NOTHING
-            `, [district.gkz, district.name, district.spo, district.grune, district.kpo, leftGreen, district.lng, district.lat]);
-        }
-
-        console.log('✅ Sample data imported successfully');
+        console.log('🎉 All actual data imported successfully!');
     } catch (error) {
-        console.error('❌ Error importing sample data:', error);
+        console.error('❌ Error importing actual data:', error);
+    }
+}
+
+async function importCO2Sources(client) {
+    console.log('📊 Importing CO2 Sources from Excel...');
+    
+    try {
+        const filePath = path.join(__dirname, 'CO2 sources.xlsx');
+        
+        if (!fs.existsSync(filePath)) {
+            console.log('⚠️ CO2 sources.xlsx not found, skipping...');
+            return;
+        }
+
+        const workbook = XLSX.readFile(filePath);
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(sheet);
+
+        let imported = 0;
+        for (const row of data) {
+            try {
+                const insertQuery = `
+                    INSERT INTO co2_sources (
+                        plant_name, plant_type, total_co2_t, fossil_co2_t, 
+                        geogenic_co2_t, biogenic_co2_t, comment, geom
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($8, $9), 4326))
+                    ON CONFLICT DO NOTHING
+                `;
+
+                await client.query(insertQuery, [
+                    row['Plant Name'] || '',
+                    row['Plant Type'] || '',
+                    parseFloat(row['Total_CO2_t']) || 0,
+                    parseFloat(row['Fossil_CO2_t']) || 0,
+                    parseFloat(row['Geogenic_CO2_t']) || 0,
+                    parseFloat(row['Biogenic_CO2_t']) || 0,
+                    row['Comment'] || '',
+                    parseFloat(row['Longitude']) || 0,
+                    parseFloat(row['Latitude']) || 0
+                ]);
+                imported++;
+            } catch (error) {
+                console.error('Error importing CO2 source row:', error);
+            }
+        }
+
+        console.log(`✅ Imported ${imported} CO2 sources`);
+    } catch (error) {
+        console.error('❌ Error importing CO2 sources:', error);
+    }
+}
+
+async function importVotingData(client) {
+    console.log('🗳️ Importing Voting Data from CSV...');
+    
+    try {
+        const filePath = path.join(__dirname, 'Voter by communes 2024.csv');
+        
+        if (!fs.existsSync(filePath)) {
+            console.log('⚠️ Voter by communes 2024.csv not found, skipping...');
+            return;
+        }
+
+        return new Promise((resolve, reject) => {
+            const results = [];
+            let imported = 0;
+            
+            fs.createReadStream(filePath)
+                .pipe(csv())
+                .on('data', (data) => results.push(data))
+                .on('end', async () => {
+                    try {
+                        for (const row of results) {
+                            try {
+                                // Calculate left+green combined percentage
+                                const spo_pct = parseFloat(row['SPÖ_percent']) || 0;
+                                const grune_pct = parseFloat(row['GRÜNE_percent']) || 0;
+                                const kpo_pct = parseFloat(row['KPÖ_percent']) || 0;
+                                const left_green_combined = spo_pct + grune_pct + kpo_pct;
+
+                                const insertQuery = `
+                                    INSERT INTO voting_districts (
+                                        gkz, name, spo_percent, ovp_percent, fpo_percent,
+                                        grune_percent, kpo_percent, neos_percent, 
+                                        left_green_combined, geom
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, ST_SetSRID(ST_MakePoint($10, $11), 4326))
+                                    ON CONFLICT (gkz) DO NOTHING
+                                `;
+
+                                await client.query(insertQuery, [
+                                    parseInt(row['gkz']) || 0,
+                                    row['name'] || '',
+                                    spo_pct,
+                                    parseFloat(row['ÖVP_percent']) || 0,
+                                    parseFloat(row['FPÖ_percent']) || 0,
+                                    grune_pct,
+                                    kpo_pct,
+                                    parseFloat(row['NEOS_percent']) || 0,
+                                    left_green_combined,
+                                    parseFloat(row['center_lng']) || 0,
+                                    parseFloat(row['center_lat']) || 0
+                                ]);
+                                imported++;
+                            } catch (error) {
+                                console.error('Error importing voting district row:', error);
+                            }
+                        }
+
+                        console.log(`✅ Imported ${imported} voting districts`);
+                        resolve();
+                    } catch (error) {
+                        console.error('❌ Error importing voting data:', error);
+                        reject(error);
+                    }
+                });
+        });
+    } catch (error) {
+        console.error('❌ Error importing voting data:', error);
+    }
+}
+
+async function importLandfills(client) {
+    console.log('🗑️ Importing Landfills from CSV...');
+    
+    try {
+        const filePath = path.join(__dirname, 'LandfiilsDeponien.csv');
+        
+        if (!fs.existsSync(filePath)) {
+            console.log('⚠️ LandfiilsDeponien.csv not found, skipping...');
+            return;
+        }
+
+        return new Promise((resolve, reject) => {
+            const results = [];
+            let imported = 0;
+            
+            fs.createReadStream(filePath)
+                .pipe(csv())
+                .on('data', (data) => results.push(data))
+                .on('end', async () => {
+                    try {
+                        for (const row of results) {
+                            try {
+                                const insertQuery = `
+                                    INSERT INTO landfills (
+                                        company_name, location_name, district, postal_code,
+                                        address, facility_type, geom
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, ST_SetSRID(ST_MakePoint($7, $8), 4326))
+                                `;
+
+                                await client.query(insertQuery, [
+                                    row['Firmen_Nam'] || '',
+                                    row['Standort_N'] || '',
+                                    row['Standort_B'] || '',
+                                    parseInt(row['Standort_P']) || null,
+                                    row['Standort_S'] || '',
+                                    row['Anlagenbez'] || '',
+                                    parseFloat(row['Y_Koordina']) || 0, // Note: Y is longitude
+                                    parseFloat(row['X_Koordina']) || 0  // Note: X is latitude
+                                ]);
+                                imported++;
+                            } catch (error) {
+                                console.error('Error importing landfill row:', error);
+                            }
+                        }
+
+                        console.log(`✅ Imported ${imported} landfills`);
+                        resolve();
+                    } catch (error) {
+                        console.error('❌ Error importing landfills:', error);
+                        reject(error);
+                    }
+                });
+        });
+    } catch (error) {
+        console.error('❌ Error importing landfills:', error);
+    }
+}
+
+async function importGravelPits(client) {
+    console.log('⛏️ Importing Gravel Pits from CSV...');
+    
+    try {
+        const filePath = path.join(__dirname, 'Gravel pits  stone quarries.csv.csv');
+        
+        if (!fs.existsSync(filePath)) {
+            console.log('⚠️ Gravel pits stone quarries.csv not found, skipping...');
+            return;
+        }
+
+        return new Promise((resolve, reject) => {
+            const results = [];
+            let imported = 0;
+            
+            fs.createReadStream(filePath)
+                .pipe(csv())
+                .on('data', (data) => results.push(data))
+                .on('end', async () => {
+                    try {
+                        for (const row of results) {
+                            try {
+                                const insertQuery = `
+                                    INSERT INTO gravel_pits (
+                                        name, resource, tags, geometry_text, geom
+                                    ) VALUES ($1, $2, $3, $4, ST_SetSRID(ST_MakePoint($5, $6), 4326))
+                                `;
+
+                                await client.query(insertQuery, [
+                                    row['name'] || '',
+                                    row['resource'] || '',
+                                    row['tags'] || '',
+                                    row['geometry'] || '',
+                                    parseFloat(row['center_lng']) || 0,
+                                    parseFloat(row['center_lat']) || 0
+                                ]);
+                                imported++;
+                            } catch (error) {
+                                console.error('Error importing gravel pit row:', error);
+                            }
+                        }
+
+                        console.log(`✅ Imported ${imported} gravel pits & stone quarries`);
+                        resolve();
+                    } catch (error) {
+                        console.error('❌ Error importing gravel pits:', error);
+                        reject(error);
+                    }
+                });
+        });
+    } catch (error) {
+        console.error('❌ Error importing gravel pits:', error);
+    }
+}
+
+async function importWastewaterPlants(client) {
+    console.log('🏭 Importing Wastewater Plants from CSV...');
+    
+    try {
+        const filePath = path.join(__dirname, 'Kläranlagen  Wastewater treatment plants.csv');
+        
+        if (!fs.existsSync(filePath)) {
+            console.log('⚠️ Kläranlagen Wastewater treatment plants.csv not found, skipping...');
+            return;
+        }
+
+        return new Promise((resolve, reject) => {
+            const results = [];
+            let imported = 0;
+            
+            fs.createReadStream(filePath)
+                .pipe(csv())
+                .on('data', (data) => results.push(data))
+                .on('end', async () => {
+                    try {
+                        for (const row of results) {
+                            try {
+                                const insertQuery = `
+                                    INSERT INTO wastewater_plants (
+                                        pk, pkint, label, begin_date, treatment_type, capacity, geom
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, ST_SetSRID(ST_MakePoint($7, $8), 4326))
+                                `;
+
+                                await client.query(insertQuery, [
+                                    row['PK'] || '',
+                                    row['PKINT'] || '',
+                                    row['LABEL'] || '',
+                                    row['BEGIN_DAT'] || '',
+                                    row['ABW_BEHANDLUNG'] || '',
+                                    parseInt(row['KAPAZITAET']) || null,
+                                    parseFloat(row['long']) || 0,
+                                    parseFloat(row['lat']) || 0
+                                ]);
+                                imported++;
+                            } catch (error) {
+                                console.error('Error importing wastewater plant row:', error);
+                            }
+                        }
+
+                        console.log(`✅ Imported ${imported} wastewater treatment plants`);
+                        resolve();
+                    } catch (error) {
+                        console.error('❌ Error importing wastewater plants:', error);
+                        reject(error);
+                    }
+                });
+        });
+    } catch (error) {
+        console.error('❌ Error importing wastewater plants:', error);
     }
 }
 
