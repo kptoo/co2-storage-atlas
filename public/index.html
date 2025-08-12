@@ -1,0 +1,1446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CO₂ Storage Atlas - Upper Austria & Salzburg</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #ffffff;
+            overflow: hidden;
+        }
+
+        #map {
+            height: 100vh;
+            width: 100%;
+        }
+
+        .control-panel {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 20px;
+            min-width: 280px;
+            max-height: 80vh;
+            overflow-y: auto;
+            z-index: 1000;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .control-panel h3 {
+            margin-bottom: 15px;
+            color: #4CAF50;
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .layer-controls {
+            margin-bottom: 20px;
+        }
+
+        .layer-control {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            padding: 8px;
+            border-radius: 6px;
+            transition: background-color 0.2s;
+        }
+
+        .layer-control:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .layer-control input[type="checkbox"] {
+            margin-right: 10px;
+            accent-color: #4CAF50;
+        }
+
+        .layer-control label {
+            font-size: 14px;
+            cursor: pointer;
+            flex: 1;
+        }
+
+        .layer-legend {
+            width: 20px;
+            height: 20px;
+            border-radius: 3px;
+            margin-left: 8px;
+        }
+
+        .basemap-controls {
+            margin-bottom: 20px;
+        }
+
+        .basemap-controls select {
+            width: 100%;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            color: white;
+            font-size: 14px;
+        }
+
+        .basemap-controls select option {
+            background: #2a2a2a;
+            color: white;
+        }
+
+        .auth-section {
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding-top: 15px;
+            margin-top: 15px;
+        }
+
+        .auth-form input {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            color: white;
+            font-size: 14px;
+        }
+
+        .auth-form input::placeholder {
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #45a049;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .title-bar {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 15px 20px;
+            z-index: 1000;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .title-bar h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #4CAF50;
+            margin: 0;
+        }
+
+        .title-bar p {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.7);
+            margin: 4px 0 0 0;
+        }
+
+        /* Loading spinner */
+        .loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 30px;
+            z-index: 2000;
+            text-align: center;
+        }
+
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            border-top: 3px solid #4CAF50;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Custom popup styles */
+        .leaflet-popup-content-wrapper {
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: white;
+            border-radius: 8px;
+        }
+
+        .leaflet-popup-tip {
+            background: rgba(26, 26, 26, 0.95);
+        }
+
+        .popup-content h4 {
+            color: #4CAF50;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .popup-content p {
+            margin: 4px 0;
+            font-size: 12px;
+        }
+
+        .scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .scrollbar::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+
+        .scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 3px;
+        }
+
+        .scrollbar::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.5);
+        }
+
+        /* Admin Panel Styles */
+        .admin-panel {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid #4CAF50;
+            border-radius: 12px;
+            padding: 20px;
+            min-width: 300px;
+            max-height: 60vh;
+            overflow-y: auto;
+            z-index: 1001;
+            box-shadow: 0 8px 32px rgba(76, 175, 80, 0.3);
+            display: none;
+        }
+
+        .admin-panel.active {
+            display: block;
+        }
+
+        .admin-panel h3 {
+            color: #4CAF50;
+            margin-bottom: 15px;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Panel Toggle Buttons */
+        .panel-toggle-controls {
+            position: fixed;
+            top: 20px;
+            right: 300px;
+            z-index: 1002;
+            display: flex;
+            gap: 10px;
+        }
+
+        .toggle-btn {
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 8px 12px;
+            color: white;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+        }
+
+        .toggle-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: #4CAF50;
+        }
+
+        .toggle-btn.active {
+            background: #4CAF50;
+            border-color: #4CAF50;
+        }
+
+        /* Collapsed panel indicator */
+        .control-panel.collapsed {
+            transform: translateX(100%);
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .control-panel {
+            transition: all 0.3s ease-in-out;
+        }
+
+        .admin-panel {
+            transition: all 0.3s ease-in-out;
+        }
+
+        .admin-panel:not(.active) {
+            transform: translateY(20px);
+            opacity: 0;
+        }
+
+        /* Admin status indicator */
+        .admin-status {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid #4CAF50;
+            border-radius: 8px;
+            padding: 8px 12px;
+            color: #4CAF50;
+            font-size: 12px;
+            z-index: 1000;
+            display: none;
+        }
+
+        .admin-status.show {
+            display: block;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .control-panel {
+                min-width: 250px;
+                max-height: 70vh;
+                right: 10px;
+                top: 10px;
+            }
+            
+            .admin-panel {
+                min-width: 280px;
+                max-height: 50vh;
+                right: 10px;
+                bottom: 10px;
+            }
+            
+            .panel-toggle-controls {
+                right: 10px;
+                top: 80px;
+                flex-direction: column;
+            }
+            
+            .title-bar {
+                left: 10px;
+                top: 10px;
+            }
+            
+            .admin-status {
+                left: 10px;
+                bottom: 10px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .control-panel {
+                min-width: calc(100vw - 40px);
+                right: 20px;
+                left: 20px;
+            }
+            
+            .admin-panel {
+                min-width: calc(100vw - 40px);
+                right: 20px;
+                left: 20px;
+            }
+        }
+
+        .admin-tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 15px;
+        }
+
+        .admin-tab {
+            padding: 6px 12px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .admin-tab.active {
+            background: #4CAF50;
+            border-color: #4CAF50;
+        }
+
+        .admin-tab:hover {
+            background: rgba(76, 175, 80, 0.3);
+        }
+
+        .admin-form {
+            display: none;
+        }
+
+        .admin-form.active {
+            display: block;
+        }
+
+        .admin-form input, .admin-form select, .admin-form textarea {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            color: white;
+            font-size: 12px;
+        }
+
+        .admin-form input::placeholder, .admin-form textarea::placeholder {
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .admin-form textarea {
+            height: 60px;
+            resize: vertical;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 12px;
+            flex: 1;
+        }
+
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #d32f2f;
+        }
+
+        .popup-admin-controls {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+            display: none;
+        }
+
+        .popup-admin-controls.show {
+            display: block;
+        }
+
+        .popup-admin-controls button {
+            margin-right: 5px;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="title-bar">
+        <h1>🏭 CO₂ Storage Atlas</h1>
+        <p>Upper Austria & Salzburg</p>
+    </div>
+
+    <!-- Panel Toggle Controls -->
+    <div class="panel-toggle-controls">
+        <button class="toggle-btn active" id="toggle-main-panel" title="Toggle Layer Controls">
+            📊 Layers
+        </button>
+        <button class="toggle-btn" id="toggle-admin-panel" title="Toggle Admin Panel" style="display: none;">
+            ⚡ Admin
+        </button>
+    </div>
+
+    <div id="map"></div>
+
+    <div class="control-panel scrollbar">
+        <h3>🗺️ Map Layers</h3>
+        <div class="layer-controls">
+            <div class="layer-control">
+                <input type="checkbox" id="layer-voting" checked>
+                <label for="layer-voting">Left+Green Voting Share</label>
+                <div class="layer-legend" style="background: linear-gradient(90deg, #ff9999, #66ff66);"></div>
+            </div>
+            <div class="layer-control">
+                <input type="checkbox" id="layer-co2-sources" checked>
+                <label for="layer-co2-sources">CO₂ Emission Sources</label>
+                <div class="layer-legend" style="background: #ff4444;"></div>
+            </div>
+            <div class="layer-control">
+                <input type="checkbox" id="layer-landfills" checked>
+                <label for="layer-landfills">Landfills</label>
+                <div class="layer-legend" style="background: #ff8800;"></div>
+            </div>
+            <div class="layer-control">
+                <input type="checkbox" id="layer-gravel-pits" checked>
+                <label for="layer-gravel-pits">Gravel Pits & Quarries</label>
+                <div class="layer-legend" style="background: #8855aa;"></div>
+            </div>
+            <div class="layer-control">
+                <input type="checkbox" id="layer-wastewater" checked>
+                <label for="layer-wastewater">Wastewater Plants</label>
+                <div class="layer-legend" style="background: #3388ff;"></div>
+            </div>
+            <div class="layer-control">
+                <input type="checkbox" id="layer-gas-pipelines">
+                <label for="layer-gas-pipelines">Gas Pipelines</label>
+                <div class="layer-legend" style="background: #00aa44;"></div>
+            </div>
+            <div class="layer-control">
+                <input type="checkbox" id="layer-gas-storage">
+                <label for="layer-gas-storage">Gas Storage Sites</label>
+                <div class="layer-legend" style="background: #00cc88;"></div>
+            </div>
+        </div>
+
+        <h3>🌍 Base Map</h3>
+        <div class="basemap-controls">
+            <select id="basemap-selector">
+                <option value="osm">OpenStreetMap</option>
+                <option value="satellite">Satellite Imagery</option>
+                <option value="terrain">Terrain</option>
+            </select>
+        </div>
+
+        <div class="auth-section">
+            <h3>🔐 Admin Access</h3>
+            <div class="auth-form">
+                <input type="password" id="admin-password" placeholder="Enter admin password">
+                <button class="btn btn-primary" id="admin-login-btn">Login</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="loading" class="loading" style="display: none;">
+        <div class="spinner"></div>
+        <p>Loading map data...</p>
+    </div>
+
+    <!-- Admin Panel -->
+    <div id="admin-panel" class="admin-panel scrollbar">
+        <h3>⚡ Admin Panel</h3>
+        
+        <div style="background: rgba(76, 175, 80, 0.1); padding: 8px; border-radius: 6px; margin-bottom: 15px; font-size: 12px;">
+            💡 <strong>Tip:</strong> Click anywhere on the map to auto-fill coordinates!<br>
+            ⌨️ <strong>Shortcuts:</strong> Ctrl+L (toggle layers), Ctrl+A (toggle admin), ESC (close panels)
+        </div>
+        
+        <div class="admin-tabs">
+            <div class="admin-tab active" data-tab="co2">CO₂ Sources</div>
+            <div class="admin-tab" data-tab="landfill">Landfills</div>
+            <div class="admin-tab" data-tab="gravel">Gravel Pits</div>
+        </div>
+
+        <!-- CO2 Sources Form -->
+        <div id="admin-form-co2" class="admin-form active">
+            <h4>Add CO₂ Source</h4>
+            <input type="text" id="co2-plant-name" placeholder="Plant Name">
+            <select id="co2-plant-type">
+                <option value="">Select Type</option>
+                <option value="Waste-to-energy plant">Waste-to-energy plant</option>
+                <option value="Biomethane plant">Biomethane plant</option>
+                <option value="Paper mill">Paper mill</option>
+                <option value="Cement plant">Cement plant</option>
+                <option value="Other">Other</option>
+            </select>
+            <input type="number" id="co2-total" placeholder="Total CO₂ (t/year)">
+            <input type="number" id="co2-fossil" placeholder="Fossil CO₂ (t/year)">
+            <input type="number" id="co2-biogenic" placeholder="Biogenic CO₂ (t/year)">
+            <input type="number" id="co2-latitude" placeholder="Latitude" step="0.000001">
+            <input type="number" id="co2-longitude" placeholder="Longitude" step="0.000001">
+            <textarea id="co2-comment" placeholder="Comments/Notes"></textarea>
+            
+            <div class="btn-group">
+                <button class="btn btn-primary btn-small" onclick="addCO2Source()">Add Source</button>
+                <button class="btn btn-secondary btn-small" onclick="clearCO2Form()">Clear</button>
+            </div>
+        </div>
+
+        <!-- Landfills Form -->
+        <div id="admin-form-landfill" class="admin-form">
+            <h4>Add Landfill</h4>
+            <input type="text" id="landfill-company" placeholder="Company Name">
+            <input type="text" id="landfill-location" placeholder="Location Name">
+            <input type="text" id="landfill-district" placeholder="District">
+            <input type="text" id="landfill-address" placeholder="Address">
+            <input type="text" id="landfill-type" placeholder="Facility Type">
+            <input type="number" id="landfill-latitude" placeholder="Latitude" step="0.000001">
+            <input type="number" id="landfill-longitude" placeholder="Longitude" step="0.000001">
+            
+            <div class="btn-group">
+                <button class="btn btn-primary btn-small" onclick="addLandfill()">Add Landfill</button>
+                <button class="btn btn-secondary btn-small" onclick="clearLandfillForm()">Clear</button>
+            </div>
+        </div>
+
+        <!-- Gravel Pits Form -->
+        <div id="admin-form-gravel" class="admin-form">
+            <h4>Add Gravel Pit/Quarry</h4>
+            <input type="text" id="gravel-name" placeholder="Site Name">
+            <input type="text" id="gravel-resource" placeholder="Resource Type">
+            <input type="text" id="gravel-tags" placeholder="Tags">
+            <input type="number" id="gravel-latitude" placeholder="Latitude" step="0.000001">
+            <input type="number" id="gravel-longitude" placeholder="Longitude" step="0.000001">
+            
+            <div class="btn-group">
+                <button class="btn btn-primary btn-small" onclick="addGravelPit()">Add Site</button>
+                <button class="btn btn-secondary btn-small" onclick="clearGravelForm()">Clear</button>
+            </div>
+        </div>
+
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1);">
+            <button class="btn btn-danger btn-small" onclick="logoutAndCloseAdmin()">🚪 Logout & Close</button>
+        </div>
+    </div>
+
+    <!-- Admin Status Indicator -->
+    <div id="admin-status" class="admin-status">
+        🔐 Admin Mode Active
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        // Global variables
+        let map;
+        let layers = {};
+        let baseMaps = {};
+        let isAuthenticated = false;
+
+        // Initialize map
+        function initMap() {
+            // Create map centered on Upper Austria/Salzburg
+            map = L.map('map').setView([47.8, 13.5], 8);
+
+            // Base layers
+            baseMaps.osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            });
+
+            baseMaps.satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                attribution: 'Tiles © Esri'
+            });
+
+            baseMaps.terrain = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenTopoMap contributors'
+            });
+
+            // Set default base layer
+            baseMaps.osm.addTo(map);
+
+            // Initialize layers
+            initLayers();
+            loadAllData();
+        }
+
+        function initLayers() {
+            layers.voting = L.layerGroup().addTo(map);
+            layers.co2Sources = L.layerGroup().addTo(map);
+            layers.landfills = L.layerGroup().addTo(map);
+            layers.gravelPits = L.layerGroup().addTo(map);
+            layers.wastewater = L.layerGroup().addTo(map);
+            layers.gasPipelines = L.layerGroup();
+            layers.gasStorage = L.layerGroup();
+        }
+
+        async function loadAllData() {
+            showLoading(true);
+            
+            try {
+                await Promise.all([
+                    loadVotingData(),
+                    loadCO2Sources(),
+                    loadLandfills(),
+                    loadGravelPits(),
+                    loadWastewaterPlants(),
+                    loadGasPipelines(),
+                    loadGasStorage()
+                ]);
+            } catch (error) {
+                console.error('Error loading data:', error);
+                alert('Error loading map data. Please refresh the page.');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        async function loadVotingData() {
+            try {
+                const response = await fetch('/api/voting-districts');
+                const data = await response.json();
+                
+                data.forEach(district => {
+                    if (district.longitude && district.latitude) {
+                        // Ensure left_green_combined is a valid number
+                        const leftGreenValue = parseFloat(district.left_green_combined) || 0;
+                        const color = getVotingColor(leftGreenValue);
+                        
+                        const marker = L.circleMarker([district.latitude, district.longitude], {
+                            radius: 8,
+                            fillColor: color,
+                            color: color,
+                            weight: 1,
+                            opacity: 0.7,
+                            fillOpacity: 0.5
+                        });
+
+                        marker.bindPopup(`
+                            <div class="popup-content">
+                                <h4>${district.name || 'District'}</h4>
+                                <p><strong>Left+Green Combined:</strong> ${leftGreenValue.toFixed(1)}%</p>
+                                <p><strong>SPÖ:</strong> ${(parseFloat(district.spo_percent) || 0).toFixed(1)}%</p>
+                                <p><strong>GRÜNE:</strong> ${(parseFloat(district.grune_percent) || 0).toFixed(1)}%</p>
+                                <p><strong>ÖVP:</strong> ${(parseFloat(district.ovp_percent) || 0).toFixed(1)}%</p>
+                                <p><strong>FPÖ:</strong> ${(parseFloat(district.fpo_percent) || 0).toFixed(1)}%</p>
+                            </div>
+                        `);
+
+                        layers.voting.addLayer(marker);
+                    }
+                });
+            } catch (error) {
+                console.error('Error loading voting data:', error);
+            }
+        }
+
+        function getVotingColor(percentage) {
+            if (!percentage) return '#cccccc';
+            
+            // Color scale from red (low left+green) to green (high left+green)
+            const ratio = Math.min(percentage / 50, 1); // Normalize to 0-1, cap at 50%
+            const red = Math.round(255 * (1 - ratio));
+            const green = Math.round(255 * ratio);
+            return `rgb(${red}, ${green}, 100)`;
+        }
+
+        async function loadCO2Sources() {
+            try {
+                const response = await fetch('/api/co2-sources');
+                const data = await response.json();
+                
+                data.forEach(source => {
+                    if (source.longitude && source.latitude) {
+                        const totalCO2 = parseFloat(source.total_co2_t) || 0;
+                        const size = Math.max(6, Math.min(20, totalCO2 / 50000 * 10));
+                        
+                        const marker = L.circleMarker([source.latitude, source.longitude], {
+                            radius: size,
+                            fillColor: '#ff4444',
+                            color: '#ff0000',
+                            weight: 2,
+                            opacity: 0.8,
+                            fillOpacity: 0.6
+                        });
+
+                        // Store source data in marker
+                        marker.sourceData = source;
+
+                        const popupContent = `
+                            <div class="popup-content">
+                                <h4>🏭 ${source.plant_name || 'CO₂ Source'}</h4>
+                                <p><strong>Type:</strong> ${source.plant_type || 'N/A'}</p>
+                                <p><strong>Total CO₂:</strong> ${totalCO2.toLocaleString()} t/year</p>
+                                <p><strong>Fossil CO₂:</strong> ${(parseFloat(source.fossil_co2_t) || 0).toLocaleString()} t/year</p>
+                                <p><strong>Biogenic CO₂:</strong> ${(parseFloat(source.biogenic_co2_t) || 0).toLocaleString()} t/year</p>
+                                ${source.comment ? `<p><strong>Note:</strong> ${source.comment}</p>` : ''}
+                                <div id="admin-controls-${source.id}" class="popup-admin-controls ${isAuthenticated ? 'show' : ''}">
+                                    <button class="btn btn-primary btn-small" onclick="editCO2Source(${source.id})">Edit</button>
+                                    <button class="btn btn-danger btn-small" onclick="deleteCO2Source(${source.id})">Delete</button>
+                                </div>
+                            </div>
+                        `;
+
+                        marker.bindPopup(popupContent);
+                        layers.co2Sources.addLayer(marker);
+                    }
+                });
+            } catch (error) {
+                console.error('Error loading CO2 sources:', error);
+            }
+        }
+
+        async function loadLandfills() {
+            try {
+                const response = await fetch('/api/landfills');
+                const data = await response.json();
+                
+                data.forEach(landfill => {
+                    if (landfill.longitude && landfill.latitude) {
+                        const marker = L.circleMarker([landfill.latitude, landfill.longitude], {
+                            radius: 6,
+                            fillColor: '#ff8800',
+                            color: '#ff6600',
+                            weight: 2,
+                            opacity: 0.8,
+                            fillOpacity: 0.6
+                        });
+
+                        marker.bindPopup(`
+                            <div class="popup-content">
+                                <h4>🗑️ ${landfill.location_name}</h4>
+                                <p><strong>Company:</strong> ${landfill.company_name}</p>
+                                <p><strong>District:</strong> ${landfill.district}</p>
+                                <p><strong>Type:</strong> ${landfill.facility_type}</p>
+                                ${landfill.address ? `<p><strong>Address:</strong> ${landfill.address}</p>` : ''}
+                            </div>
+                        `);
+
+                        layers.landfills.addLayer(marker);
+                    }
+                });
+            } catch (error) {
+                console.error('Error loading landfills:', error);
+            }
+        }
+
+        async function loadGravelPits() {
+            try {
+                const response = await fetch('/api/gravel-pits');
+                const data = await response.json();
+                
+                data.forEach(pit => {
+                    if (pit.longitude && pit.latitude) {
+                        const marker = L.circleMarker([pit.latitude, pit.longitude], {
+                            radius: 5,
+                            fillColor: '#8855aa',
+                            color: '#6633aa',
+                            weight: 2,
+                            opacity: 0.8,
+                            fillOpacity: 0.6
+                        });
+
+                        marker.bindPopup(`
+                            <div class="popup-content">
+                                <h4>⛏️ ${pit.name || 'Gravel Pit/Quarry'}</h4>
+                                <p><strong>Resource:</strong> ${pit.resource}</p>
+                                ${pit.tags ? `<p><strong>Tags:</strong> ${pit.tags}</p>` : ''}
+                            </div>
+                        `);
+
+                        layers.gravelPits.addLayer(marker);
+                    }
+                });
+            } catch (error) {
+                console.error('Error loading gravel pits:', error);
+            }
+        }
+
+        async function loadWastewaterPlants() {
+            try {
+                const response = await fetch('/api/wastewater-plants');
+                const data = await response.json();
+                
+                data.forEach(plant => {
+                    if (plant.longitude && plant.latitude) {
+                        const size = plant.capacity ? Math.max(4, Math.min(12, plant.capacity / 10000 * 5)) : 6;
+                        const marker = L.circleMarker([plant.latitude, plant.longitude], {
+                            radius: size,
+                            fillColor: '#3388ff',
+                            color: '#0066cc',
+                            weight: 2,
+                            opacity: 0.8,
+                            fillOpacity: 0.6
+                        });
+
+                        marker.bindPopup(`
+                            <div class="popup-content">
+                                <h4>🏭 ${plant.label}</h4>
+                                <p><strong>Treatment:</strong> ${plant.treatment_type}</p>
+                                ${plant.capacity ? `<p><strong>Capacity:</strong> ${plant.capacity?.toLocaleString()} PE</p>` : ''}
+                                <p><strong>ID:</strong> ${plant.pk}</p>
+                            </div>
+                        `);
+
+                        layers.wastewater.addLayer(marker);
+                    }
+                });
+            } catch (error) {
+                console.error('Error loading wastewater plants:', error);
+            }
+        }
+
+        async function loadGasPipelines() {
+            try {
+                const response = await fetch('/api/gas-pipelines');
+                const data = await response.json();
+                
+                data.forEach(pipeline => {
+                    if (pipeline.geometry) {
+                        try {
+                            const geometry = JSON.parse(pipeline.geometry);
+                            const polyline = L.geoJSON(geometry, {
+                                style: {
+                                    color: '#00aa44',
+                                    weight: 3,
+                                    opacity: 0.8
+                                }
+                            });
+
+                            polyline.bindPopup(`
+                                <div class="popup-content">
+                                    <h4>🚰 ${pipeline.name}</h4>
+                                    <p><strong>Operator:</strong> ${pipeline.operator}</p>
+                                    <p><strong>Diameter:</strong> ${pipeline.diameter} mm</p>
+                                    <p><strong>Pressure:</strong> ${pipeline.pressure_level}</p>
+                                </div>
+                            `);
+
+                            layers.gasPipelines.addLayer(polyline);
+                        } catch (e) {
+                            console.error('Error parsing pipeline geometry:', e);
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error('Error loading gas pipelines:', error);
+            }
+        }
+
+        async function loadGasStorage() {
+            try {
+                const response = await fetch('/api/gas-storage-sites');
+                const data = await response.json();
+                
+                data.forEach(storage => {
+                    if (storage.longitude && storage.latitude) {
+                        const size = storage.capacity_bcm ? Math.max(6, Math.min(15, storage.capacity_bcm * 3)) : 8;
+                        const marker = L.circleMarker([storage.latitude, storage.longitude], {
+                            radius: size,
+                            fillColor: '#00cc88',
+                            color: '#00aa66',
+                            weight: 2,
+                            opacity: 0.8,
+                            fillOpacity: 0.6
+                        });
+
+                        marker.bindPopup(`
+                            <div class="popup-content">
+                                <h4>⛽ ${storage.name}</h4>
+                                <p><strong>Operator:</strong> ${storage.operator}</p>
+                                <p><strong>Type:</strong> ${storage.storage_type}</p>
+                                ${storage.capacity_bcm ? `<p><strong>Capacity:</strong> ${storage.capacity_bcm} BCM</p>` : ''}
+                            </div>
+                        `);
+
+                        layers.gasStorage.addLayer(marker);
+                    }
+                });
+            } catch (error) {
+                console.error('Error loading gas storage:', error);
+            }
+        }
+
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            initMap();
+
+            // Layer toggle controls
+            Object.keys(layers).forEach(layerKey => {
+                const checkbox = document.getElementById(`layer-${layerKey.replace(/([A-Z])/g, '-$1').toLowerCase()}`);
+                if (checkbox) {
+                    checkbox.addEventListener('change', function() {
+                        if (this.checked) {
+                            map.addLayer(layers[layerKey]);
+                        } else {
+                            map.removeLayer(layers[layerKey]);
+                        }
+                    });
+                }
+            });
+
+            // Basemap selector
+            document.getElementById('basemap-selector').addEventListener('change', function() {
+                // Remove current base layer
+                Object.values(baseMaps).forEach(layer => {
+                    map.removeLayer(layer);
+                });
+                
+                // Add selected base layer
+                baseMaps[this.value].addTo(map);
+            });
+
+            // Admin login button
+            document.getElementById('admin-login-btn').addEventListener('click', authenticate);
+
+            // Enter key support for password field
+            document.getElementById('admin-password').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    authenticate();
+                }
+            });
+
+            // Panel toggle buttons
+            document.getElementById('toggle-main-panel').addEventListener('click', toggleMainPanel);
+            document.getElementById('toggle-admin-panel').addEventListener('click', toggleAdminPanel);
+
+            // Admin tab switching
+            document.querySelectorAll('.admin-tab').forEach(tab => {
+                tab.addEventListener('click', function() {
+                    // Remove active class from all tabs and forms
+                    document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
+                    document.querySelectorAll('.admin-form').forEach(f => f.classList.remove('active'));
+                    
+                    // Add active class to clicked tab and corresponding form
+                    this.classList.add('active');
+                    document.getElementById(`admin-form-${this.dataset.tab}`).classList.add('active');
+                });
+            });
+
+            // Click on map to get coordinates (when admin panel is open)
+            map.on('click', function(e) {
+                if (isAuthenticated && document.getElementById('admin-panel').classList.contains('active')) {
+                    const lat = e.latlng.lat.toFixed(6);
+                    const lng = e.latlng.lng.toFixed(6);
+                    
+                    // Fill coordinates in active form
+                    const activeTab = document.querySelector('.admin-tab.active').dataset.tab;
+                    const latField = document.getElementById(`${activeTab === 'co2' ? 'co2' : activeTab}-latitude`);
+                    const lngField = document.getElementById(`${activeTab === 'co2' ? 'co2' : activeTab}-longitude`);
+                    
+                    if (latField && lngField) {
+                        latField.value = lat;
+                        lngField.value = lng;
+                        
+                        // Show temporary marker
+                        const tempMarker = L.marker([lat, lng]).addTo(map);
+                        setTimeout(() => map.removeLayer(tempMarker), 3000);
+                        
+                        console.log(`Coordinates filled: ${lat}, ${lng}`);
+                    }
+                }
+            });
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                // Ctrl/Cmd + L to toggle layer panel
+                if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
+                    e.preventDefault();
+                    toggleMainPanel();
+                }
+                
+                // Ctrl/Cmd + A to toggle admin panel (if authenticated)
+                if ((e.ctrlKey || e.metaKey) && e.key === 'a' && isAuthenticated) {
+                    e.preventDefault();
+                    toggleAdminPanel();
+                }
+                
+                // Escape key to close all panels
+                if (e.key === 'Escape') {
+                    const mainPanel = document.querySelector('.control-panel');
+                    const adminPanel = document.getElementById('admin-panel');
+                    
+                    if (!mainPanel.classList.contains('collapsed')) {
+                        toggleMainPanel();
+                    }
+                    if (adminPanel.classList.contains('active')) {
+                        toggleAdminPanel();
+                    }
+                }
+            });
+        });
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        function authenticate() {
+            const password = document.getElementById('admin-password').value;
+            
+            if (password === 'co2atlas2024') {
+                isAuthenticated = true;
+                alert('🎉 Authentication successful! Admin features enabled.\n\nYou can now:\n- Add/edit/delete CO₂ sources\n- Modify other data layers\n- Access admin endpoints');
+                document.getElementById('admin-password').value = '';
+                
+                // Change button text to show authenticated state
+                document.getElementById('admin-login-btn').textContent = 'Authenticated ✅';
+                document.getElementById('admin-login-btn').disabled = true;
+                document.getElementById('admin-login-btn').style.background = '#4CAF50';
+                
+                // Show admin panel and status
+                document.getElementById('admin-panel').classList.add('active');
+                document.getElementById('admin-status').classList.add('show');
+                document.getElementById('toggle-admin-panel').style.display = 'block';
+                document.getElementById('toggle-admin-panel').classList.add('active');
+                
+                // Add admin controls to existing markers
+                addAdminControlsToMarkers();
+            } else {
+                alert('❌ Invalid password. Please try again.');
+                document.getElementById('admin-password').value = '';
+            }
+        }
+
+        function logoutAndCloseAdmin() {
+            if (confirm('🚪 Are you sure you want to logout and close the admin panel?\n\nYou will need to login again to access admin features.')) {
+                // Reset authentication state
+                isAuthenticated = false;
+                
+                // Reset login button
+                document.getElementById('admin-login-btn').textContent = 'Login';
+                document.getElementById('admin-login-btn').disabled = false;
+                document.getElementById('admin-login-btn').style.background = '#4CAF50';
+                
+                // Hide admin panel and status
+                document.getElementById('admin-panel').classList.remove('active');
+                document.getElementById('admin-status').classList.remove('show');
+                document.getElementById('toggle-admin-panel').style.display = 'none';
+                document.getElementById('toggle-admin-panel').classList.remove('active');
+                
+                // Clear admin form
+                clearCO2Form();
+                clearLandfillForm();
+                clearGravelForm();
+                
+                // Reset any update buttons back to add
+                const addButton = document.querySelector('#admin-form-co2 .btn-primary');
+                if (addButton) {
+                    addButton.textContent = 'Add Source';
+                    addButton.onclick = addCO2Source;
+                }
+                
+                // Reload layers to remove admin controls from popups
+                layers.co2Sources.clearLayers();
+                loadCO2Sources();
+                
+                alert('👋 Successfully logged out! Admin features disabled.');
+            }
+        }
+
+        function toggleAdminPanel() {
+            const panel = document.getElementById('admin-panel');
+            const toggleBtn = document.getElementById('toggle-admin-panel');
+            
+            if (panel.classList.contains('active')) {
+                panel.classList.remove('active');
+                toggleBtn.classList.remove('active');
+            } else {
+                panel.classList.add('active');
+                toggleBtn.classList.add('active');
+            }
+        }
+
+        function toggleMainPanel() {
+            const panel = document.querySelector('.control-panel');
+            const toggleBtn = document.getElementById('toggle-main-panel');
+            
+            if (panel.classList.contains('collapsed')) {
+                panel.classList.remove('collapsed');
+                toggleBtn.classList.add('active');
+                toggleBtn.textContent = '📊 Layers';
+                toggleBtn.title = 'Hide Layer Controls';
+            } else {
+                panel.classList.add('collapsed');
+                toggleBtn.classList.remove('active');
+                toggleBtn.textContent = '👁️ Show';
+                toggleBtn.title = 'Show Layer Controls';
+            }
+        }
+
+        function addAdminControlsToMarkers() {
+            // Reload all layers to show admin controls
+            if (layers.co2Sources) {
+                layers.co2Sources.clearLayers();
+                loadCO2Sources();
+            }
+        }
+
+        // Admin Functions
+        async function addCO2Source() {
+            const data = {
+                plant_name: document.getElementById('co2-plant-name').value,
+                plant_type: document.getElementById('co2-plant-type').value,
+                total_co2_t: parseFloat(document.getElementById('co2-total').value) || 0,
+                fossil_co2_t: parseFloat(document.getElementById('co2-fossil').value) || 0,
+                geogenic_co2_t: 0,
+                biogenic_co2_t: parseFloat(document.getElementById('co2-biogenic').value) || 0,
+                comment: document.getElementById('co2-comment').value,
+                latitude: parseFloat(document.getElementById('co2-latitude').value),
+                longitude: parseFloat(document.getElementById('co2-longitude').value)
+            };
+
+            if (!data.plant_name || !data.latitude || !data.longitude) {
+                alert('Please fill in at least Plant Name, Latitude, and Longitude');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/admin/co2-sources', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                if (response.ok) {
+                    alert('✅ CO₂ source added successfully!');
+                    clearCO2Form();
+                    // Reload CO2 sources layer
+                    layers.co2Sources.clearLayers();
+                    await loadCO2Sources();
+                } else {
+                    alert('❌ Error adding CO₂ source');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('❌ Network error');
+            }
+        }
+
+        async function addLandfill() {
+            const data = {
+                company_name: document.getElementById('landfill-company').value,
+                location_name: document.getElementById('landfill-location').value,
+                district: document.getElementById('landfill-district').value,
+                address: document.getElementById('landfill-address').value,
+                facility_type: document.getElementById('landfill-type').value,
+                latitude: parseFloat(document.getElementById('landfill-latitude').value),
+                longitude: parseFloat(document.getElementById('landfill-longitude').value)
+            };
+
+            if (!data.location_name || !data.latitude || !data.longitude) {
+                alert('Please fill in at least Location Name, Latitude, and Longitude');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/admin/landfills', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                if (response.ok) {
+                    alert('✅ Landfill added successfully!');
+                    clearLandfillForm();
+                    // Reload landfills layer
+                    layers.landfills.clearLayers();
+                    await loadLandfills();
+                } else {
+                    alert('❌ Error adding landfill');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('❌ Network error');
+            }
+        }
+
+        async function addGravelPit() {
+            const data = {
+                name: document.getElementById('gravel-name').value,
+                resource: document.getElementById('gravel-resource').value,
+                tags: document.getElementById('gravel-tags').value,
+                latitude: parseFloat(document.getElementById('gravel-latitude').value),
+                longitude: parseFloat(document.getElementById('gravel-longitude').value)
+            };
+
+            if (!data.name || !data.latitude || !data.longitude) {
+                alert('Please fill in at least Name, Latitude, and Longitude');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/admin/gravel-pits', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                if (response.ok) {
+                    alert('✅ Gravel pit added successfully!');
+                    clearGravelForm();
+                    // Reload gravel pits layer
+                    layers.gravelPits.clearLayers();
+                    await loadGravelPits();
+                } else {
+                    alert('❌ Error adding gravel pit');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('❌ Network error');
+            }
+        }
+
+        function clearCO2Form() {
+            document.getElementById('co2-plant-name').value = '';
+            document.getElementById('co2-plant-type').value = '';
+            document.getElementById('co2-total').value = '';
+            document.getElementById('co2-fossil').value = '';
+            document.getElementById('co2-biogenic').value = '';
+            document.getElementById('co2-latitude').value = '';
+            document.getElementById('co2-longitude').value = '';
+            document.getElementById('co2-comment').value = '';
+        }
+
+        function clearLandfillForm() {
+            document.getElementById('landfill-company').value = '';
+            document.getElementById('landfill-location').value = '';
+            document.getElementById('landfill-district').value = '';
+            document.getElementById('landfill-address').value = '';
+            document.getElementById('landfill-type').value = '';
+            document.getElementById('landfill-latitude').value = '';
+            document.getElementById('landfill-longitude').value = '';
+        }
+
+        function clearGravelForm() {
+            document.getElementById('gravel-name').value = '';
+            document.getElementById('gravel-resource').value = '';
+            document.getElementById('gravel-tags').value = '';
+            document.getElementById('gravel-latitude').value = '';
+            document.getElementById('gravel-longitude').value = '';
+        }
+
+        async function deleteCO2Source(id) {
+            if (!id || !confirm('Are you sure you want to delete this CO₂ source?')) return;
+
+            try {
+                const response = await fetch(`/api/admin/co2-sources/${id}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    alert('✅ CO₂ source deleted successfully!');
+                    // Reload CO2 sources layer
+                    layers.co2Sources.clearLayers();
+                    await loadCO2Sources();
+                } else {
+                    alert('❌ Error deleting CO₂ source');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('❌ Network error');
+            }
+        }
+
+        function editCO2Source(id) {
+            // Find the marker with this ID
+            let sourceData = null;
+            layers.co2Sources.eachLayer(function(layer) {
+                if (layer.sourceData && layer.sourceData.id === id) {
+                    sourceData = layer.sourceData;
+                }
+            });
+
+            if (sourceData) {
+                // Fill the form with existing data
+                document.getElementById('co2-plant-name').value = sourceData.plant_name || '';
+                document.getElementById('co2-plant-type').value = sourceData.plant_type || '';
+                document.getElementById('co2-total').value = sourceData.total_co2_t || '';
+                document.getElementById('co2-fossil').value = sourceData.fossil_co2_t || '';
+                document.getElementById('co2-biogenic').value = sourceData.biogenic_co2_t || '';
+                document.getElementById('co2-latitude').value = sourceData.latitude || '';
+                document.getElementById('co2-longitude').value = sourceData.longitude || '';
+                document.getElementById('co2-comment').value = sourceData.comment || '';
+
+                // Switch to CO2 tab
+                document.querySelector('.admin-tab[data-tab="co2"]').click();
+
+                // Change the Add button to Update button
+                const addButton = document.querySelector('#admin-form-co2 .btn-primary');
+                addButton.textContent = 'Update Source';
+                addButton.onclick = () => updateCO2Source(id);
+
+                alert('📝 Source data loaded in form. Make changes and click "Update Source".');
+            }
+        }
+
+        async function updateCO2Source(id) {
+            const data = {
+                plant_name: document.getElementById('co2-plant-name').value,
+                plant_type: document.getElementById('co2-plant-type').value,
+                total_co2_t: parseFloat(document.getElementById('co2-total').value) || 0,
+                fossil_co2_t: parseFloat(document.getElementById('co2-fossil').value) || 0,
+                geogenic_co2_t: 0,
+                biogenic_co2_t: parseFloat(document.getElementById('co2-biogenic').value) || 0,
+                comment: document.getElementById('co2-comment').value,
+                latitude: parseFloat(document.getElementById('co2-latitude').value),
+                longitude: parseFloat(document.getElementById('co2-longitude').value)
+            };
+
+            try {
+                const response = await fetch(`/api/admin/co2-sources/${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                if (response.ok) {
+                    alert('✅ CO₂ source updated successfully!');
+                    clearCO2Form();
+                    
+                    // Reset button back to Add
+                    const addButton = document.querySelector('#admin-form-co2 .btn-primary');
+                    addButton.textContent = 'Add Source';
+                    addButton.onclick = addCO2Source;
+                    
+                    // Reload CO2 sources layer
+                    layers.co2Sources.clearLayers();
+                    await loadCO2Sources();
+                } else {
+                    alert('❌ Error updating CO₂ source');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('❌ Network error');
+            }
+        }
+    </script>
+</body>
+</html>
