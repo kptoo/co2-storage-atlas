@@ -14,55 +14,88 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Database connection pool with production optimizations
-const pool = new Pool({
-    host: process.env.DB_HOST,
-    port: process.env.DB_PORT || 5432,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: false },
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
-    allowExitOnIdle: true,
-    query_timeout: 60000,
-    statement_timeout: 60000,
-    application_name: 'co2_storage_atlas'
-});
+// Enhanced database connection configuration for Render
+const getDatabaseConfig = () => {
+    // Check for DATABASE_URL first (Render's standard environment variable)
+    if (process.env.DATABASE_URL) {
+        return {
+            connectionString: process.env.DATABASE_URL,
+            ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+            max: 20,
+            idleTimeoutMillis: 30000,
+            connectionTimeoutMillis: 10000,
+            allowExitOnIdle: true,
+            query_timeout: 60000,
+            statement_timeout: 60000,
+            application_name: 'co2_storage_atlas'
+        };
+    }
+    
+    // Fallback to individual environment variables
+    return {
+        host: process.env.DB_HOST || 'localhost',
+        port: process.env.DB_PORT || 5432,
+        user: process.env.DB_USER || 'postgres',
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME || 'co2_storage_atlas',
+        max: 20,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+        allowExitOnIdle: true,
+        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+        query_timeout: 60000,
+        statement_timeout: 60000,
+        application_name: 'co2_storage_atlas'
+    };
+};
 
-// Test database connection with better error handling
+// Database connection pool with enhanced configuration
+const pool = new Pool(getDatabaseConfig());
+
+// Enhanced database connection handling
 pool.on('connect', (client) => {
-    console.log('Connected to PostgreSQL database');
+    console.log('✓ Connected to PostgreSQL database');
 });
 
 pool.on('error', (err) => {
-    console.error('Database connection error:', err);
+    console.error('❌ Database connection error:', err);
     // Don't exit process in production, let health check handle it
     if (process.env.NODE_ENV !== 'production') {
         process.exit(1);
     }
 });
 
-// Test initial connection
-const testDatabaseConnection = async () => {
-    try {
-        const client = await pool.connect();
-        await client.query('SELECT NOW()');
-        client.release();
-        console.log('Database connection test successful');
-    } catch (error) {
-        console.error('Database connection test failed:', error);
-        if (process.env.NODE_ENV !== 'production') {
-            process.exit(1);
+// Enhanced database connection test with retry logic
+const testDatabaseConnection = async (retries = 3) => {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const client = await pool.connect();
+            await client.query('SELECT NOW() as current_time, version() as db_version');
+            client.release();
+            console.log(`✓ Database connection test successful (attempt ${i + 1}/${retries})`);
+            return true;
+        } catch (error) {
+            console.error(`❌ Database connection test failed (attempt ${i + 1}/${retries}):`, error.message);
+            if (i < retries - 1) {
+                console.log(`⏳ Retrying in ${(i + 1) * 2} seconds...`);
+                await new Promise(resolve => setTimeout(resolve, (i + 1) * 2000));
+            }
         }
+    }
+    
+    if (process.env.NODE_ENV === 'production') {
+        console.error('❌ All database connection attempts failed. Server will start but may not function properly.');
+        return false;
+    } else {
+        console.error('❌ Database connection failed in development mode. Exiting...');
+        process.exit(1);
     }
 };
 
 // Rate limiting with more appropriate limits for production
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: process.env.NODE_ENV === 'production' ? 500 : 1000, // Lower limit in production
+    max: process.env.NODE_ENV === 'production' ? 500 : 1000,
     message: 'Too many requests from this IP, please try again later.',
     standardHeaders: true,
     legacyHeaders: false,
@@ -70,7 +103,7 @@ const generalLimiter = rateLimit({
 
 const adminLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 50, // Strict limit for admin operations
+    max: 50,
     message: 'Too many admin requests from this IP, please try again later.',
     standardHeaders: true,
     legacyHeaders: false,
@@ -96,13 +129,14 @@ app.use(helmet({
 
 app.use(compression());
 
-// CORS configuration for production
+// Enhanced CORS configuration for production
 app.use(cors({
     origin: process.env.NODE_ENV === 'production' 
         ? [
             process.env.FRONTEND_URL,
             /\.onrender\.com$/,
-            /localhost:\d+$/
+            /localhost:\d+$/,
+            'https://co2-storage-atlas-1.onrender.com'
           ] 
         : true,
     credentials: true,
@@ -111,7 +145,7 @@ app.use(cors({
 }));
 
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(express.json({ limit: '10mb' })); // Reduced limit for production
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(generalLimiter);
 
@@ -145,7 +179,7 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// Health check endpoint - enhanced for Render
+// Enhanced health check endpoint
 app.get('/api/health', async (req, res) => {
     try {
         const result = await pool.query('SELECT NOW() as timestamp, version() as version');
@@ -163,7 +197,7 @@ app.get('/api/health', async (req, res) => {
                 geometry_test: postgisCheck.rows[0].geom_test
             };
         } catch (postgisError) {
-            postgisInfo = { error: 'PostGIS not available' };
+            postgisInfo = { error: 'PostGIS not available', message: postgisError.message };
         }
         
         res.json({ 
@@ -175,7 +209,8 @@ app.get('/api/health', async (req, res) => {
             postgis: postgisInfo,
             environment: process.env.NODE_ENV || 'development',
             port: PORT,
-            uptime: process.uptime()
+            uptime: process.uptime(),
+            database_url_configured: !!process.env.DATABASE_URL
         });
     } catch (error) {
         console.error('Health check failed:', error);
@@ -183,9 +218,23 @@ app.get('/api/health', async (req, res) => {
             status: 'ERROR', 
             error: error.message,
             timestamp: new Date().toISOString(),
-            environment: process.env.NODE_ENV || 'development'
+            environment: process.env.NODE_ENV || 'development',
+            database_url_configured: !!process.env.DATABASE_URL
         });
     }
+});
+
+// Basic info endpoint for when database is not available
+app.get('/api/info', (req, res) => {
+    res.json({
+        name: 'CO₂ Storage Atlas',
+        version: '2.1.0',
+        environment: process.env.NODE_ENV || 'development',
+        port: PORT,
+        uptime: process.uptime(),
+        database_url_configured: !!process.env.DATABASE_URL,
+        timestamp: new Date().toISOString()
+    });
 });
 
 // ========================================
@@ -689,13 +738,13 @@ app.put('/api/admin/co2-sources/:id', [
             if (key === 'latitude' || key === 'longitude') {
                 return;
             }
-            setClauses.push(`${key} = $${paramIndex}`);
+            setClauses.push(`${key} = ${paramIndex}`);
             values.push(updates[key]);
             paramIndex++;
         });
 
         if (updates.latitude && updates.longitude) {
-            setClauses.push(`geom = ST_SetSRID(ST_MakePoint($${paramIndex}, $${paramIndex + 1}), 4326)`);
+            setClauses.push(`geom = ST_SetSRID(ST_MakePoint(${paramIndex}, ${paramIndex + 1}), 4326)`);
             values.push(updates.longitude, updates.latitude);
             paramIndex += 2;
         }
@@ -708,7 +757,7 @@ app.put('/api/admin/co2-sources/:id', [
         const query = `
             UPDATE co2_sources 
             SET ${setClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $${paramIndex}
+            WHERE id = ${paramIndex}
             RETURNING *
         `;
 
@@ -824,11 +873,11 @@ app.get('/api/admin/audit-log', adminLimiter, authenticateToken, async (req, res
         const params = [];
         
         if (table_name) {
-            query += ` WHERE al.table_name = $${params.length + 1}`;
+            query += ` WHERE al.table_name = ${params.length + 1}`;
             params.push(table_name);
         }
         
-        query += ` ORDER BY al.timestamp DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        query += ` ORDER BY al.timestamp DESC LIMIT ${params.length + 1} OFFSET ${params.length + 2}`;
         params.push(limit, offset);
 
         const result = await pool.query(query, params);
@@ -867,7 +916,6 @@ app.use((error, req, res, next) => {
 process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
     if (process.env.NODE_ENV === 'production') {
-        // Log error but don't exit in production
         console.error('Application will continue running...');
     } else {
         process.exit(1);
@@ -908,12 +956,13 @@ const startServer = async () => {
         app.listen(PORT, '0.0.0.0', () => {
             console.log(`
 ========================================
-🚀 CO₂ Storage Atlas Server Started
+CO₂ Storage Atlas Server Started
 ========================================
 Environment: ${process.env.NODE_ENV || 'development'}
 Port: ${PORT}
 Database: ${process.env.DB_NAME || 'co2_storage_atlas'}
 Host: ${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || 5432}
+DATABASE_URL: ${process.env.DATABASE_URL ? 'Configured' : 'Not configured'}
 JWT Secret: ${process.env.JWT_SECRET ? 'Configured' : 'Using default'}
 SSL: ${process.env.NODE_ENV === 'production' ? 'Enabled' : 'Disabled'}
 ========================================
@@ -926,15 +975,19 @@ Features:
 - PostgreSQL with PostGIS
 - Production-ready error handling
 - Graceful shutdown handling
+- Enhanced database connection retry
 ========================================
 Health Check: /api/health
-Main App: ${process.env.NODE_ENV === 'production' ? 'https://your-app.onrender.com' : `http://localhost:${PORT}`}
+Info Endpoint: /api/info
+Main App: ${process.env.NODE_ENV === 'production' ? 'https://co2-storage-atlas-1.onrender.com' : `http://localhost:${PORT}`}
 ========================================
             `);
         });
     } catch (error) {
         console.error('Failed to start server:', error);
-        process.exit(1);
+        if (process.env.NODE_ENV !== 'production') {
+            process.exit(1);
+        }
     }
 };
 
