@@ -21,13 +21,10 @@ const getDatabaseConfig = () => {
         return {
             connectionString: process.env.DATABASE_URL,
             ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-            max: 20,
+            max: 10, // Reduced pool size for Render
             idleTimeoutMillis: 30000,
             connectionTimeoutMillis: 10000,
             allowExitOnIdle: true,
-            query_timeout: 60000,
-            statement_timeout: 60000,
-            application_name: 'co2_storage_atlas'
         };
     }
     
@@ -38,14 +35,11 @@ const getDatabaseConfig = () => {
         user: process.env.DB_USER || 'postgres',
         password: process.env.DB_PASSWORD,
         database: process.env.DB_NAME || 'co2_storage_atlas',
-        max: 20,
+        max: 10,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 10000,
         allowExitOnIdle: true,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-        query_timeout: 60000,
-        statement_timeout: 60000,
-        application_name: 'co2_storage_atlas'
     };
 };
 
@@ -70,7 +64,7 @@ const testDatabaseConnection = async (retries = 3) => {
     for (let i = 0; i < retries; i++) {
         try {
             const client = await pool.connect();
-            await client.query('SELECT NOW() as current_time, version() as db_version');
+            await client.query('SELECT NOW() as current_time');
             client.release();
             console.log(`✓ Database connection test successful (attempt ${i + 1}/${retries})`);
             return true;
@@ -83,13 +77,8 @@ const testDatabaseConnection = async (retries = 3) => {
         }
     }
     
-    if (process.env.NODE_ENV === 'production') {
-        console.error('❌ All database connection attempts failed. Server will start but may not function properly.');
-        return false;
-    } else {
-        console.error('❌ Database connection failed in development mode. Exiting...');
-        process.exit(1);
-    }
+    console.error('❌ All database connection attempts failed.');
+    return false;
 };
 
 // Rate limiting with more appropriate limits for production
@@ -114,7 +103,7 @@ app.use(helmet({
     contentSecurityPolicy: {
         directives: {
             defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://cdnjs.cloudflare.com"],
             scriptSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://cdnjs.cloudflare.com"],
             imgSrc: ["'self'", "data:", "https:", "blob:"],
             connectSrc: ["'self'"],
@@ -136,7 +125,6 @@ app.use(cors({
             process.env.FRONTEND_URL,
             /\.onrender\.com$/,
             /localhost:\d+$/,
-            'https://co2-storage-atlas-1.onrender.com'
           ] 
         : true,
     credentials: true,
@@ -179,32 +167,43 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
+// Check if PostGIS is available
+const checkPostGIS = async () => {
+    try {
+        const client = await pool.connect();
+        await client.query('SELECT PostGIS_Version()');
+        client.release();
+        return true;
+    } catch (error) {
+        console.warn('PostGIS not available, using fallback queries');
+        return false;
+    }
+};
+
+let hasPostGIS = false;
+
 // Enhanced health check endpoint
 app.get('/api/health', async (req, res) => {
     try {
-        const result = await pool.query('SELECT NOW() as timestamp, version() as version');
+        const result = await pool.query('SELECT NOW() as timestamp');
         const dbCheck = await pool.query('SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = $1', ['public']);
         
         // Check PostGIS availability
         let postgisInfo = null;
         try {
-            const postgisCheck = await pool.query(`
-                SELECT PostGIS_Version() as postgis_version,
-                       ST_IsValid(ST_MakePoint(13.5, 47.8)) as geom_test
-            `);
+            const postgisCheck = await pool.query('SELECT PostGIS_Version() as postgis_version');
             postgisInfo = {
                 version: postgisCheck.rows[0].postgis_version,
-                geometry_test: postgisCheck.rows[0].geom_test
+                available: true
             };
         } catch (postgisError) {
-            postgisInfo = { error: 'PostGIS not available', message: postgisError.message };
+            postgisInfo = { available: false, message: 'PostGIS not installed' };
         }
         
         res.json({ 
             status: 'OK', 
             timestamp: result.rows[0].timestamp,
             database: 'Connected',
-            version: result.rows[0].version,
             tables: parseInt(dbCheck.rows[0].table_count),
             postgis: postgisInfo,
             environment: process.env.NODE_ENV || 'development',
@@ -253,6 +252,18 @@ app.post('/api/auth/login', [
 
         const { username, password } = req.body;
         
+        // Check if admin_users table exists
+        const tableCheck = await pool.query(`
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'admin_users'
+            )
+        `);
+        
+        if (!tableCheck.rows[0].exists) {
+            return res.status(503).json({ error: 'Admin functionality not configured' });
+        }
+        
         const result = await pool.query(
             'SELECT id, username, password_hash FROM admin_users WHERE username = $1 AND is_active = true',
             [username]
@@ -292,32 +303,105 @@ app.post('/api/auth/login', [
 });
 
 // ========================================
-// DATA RETRIEVAL ENDPOINTS WITH PERFORMANCE OPTIMIZATION
+// DATA RETRIEVAL ENDPOINTS WITH FALLBACKS
 // ========================================
 
-// CO2 Sources with enhanced performance
+// Helper function to check if table exists
+const tableExists = async (tableName) => {
+    try {
+        const result = await pool.query(`
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = $1
+            )
+        `, [tableName]);
+        return result.rows[0].exists;
+    } catch (error) {
+        console.error(`Error checking table ${tableName}:`, error);
+        return false;
+    }
+};
+
+// Helper function to check if column exists
+const columnExists = async (tableName, columnName) => {
+    try {
+        const result = await pool.query(`
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+            )
+        `, [tableName, columnName]);
+        return result.rows[0].exists;
+    } catch (error) {
+        console.error(`Error checking column ${columnName} in ${tableName}:`, error);
+        return false;
+    }
+};
+
+// CO2 Sources with enhanced performance and fallbacks
 app.get('/api/co2-sources-enhanced', async (req, res) => {
     try {
+        // Check if table exists
+        if (!(await tableExists('co2_sources'))) {
+            return res.json([]); // Return empty array if table doesn't exist
+        }
+
         const { bbox, zoom } = req.query;
+        
+        // Build query with fallbacks for missing columns
+        const hasGeom = await columnExists('co2_sources', 'geom');
+        const hasLongitude = await columnExists('co2_sources', 'longitude');
+        const hasLatitude = await columnExists('co2_sources', 'latitude');
+        const hasPinSize = await columnExists('co2_sources', 'pin_size');
+        const hasPinColor = await columnExists('co2_sources', 'pin_color');
+        const hasProminent = await columnExists('co2_sources', 'is_prominent');
+        
         let query = `
-            SELECT id, plant_name, plant_type, total_co2_t, fossil_co2_t,
-                   biogenic_co2_t, comment, is_prominent, pin_size, pin_color,
-                   ST_X(geom) as longitude, ST_Y(geom) as latitude,
-                   ST_IsValid(geom) as geom_valid
-            FROM co2_sources
-            WHERE geom IS NOT NULL AND ST_IsValid(geom) = true
+            SELECT id, 
+                   plant_name, 
+                   plant_type, 
+                   COALESCE(total_co2_t, 0) as total_co2_t, 
+                   COALESCE(fossil_co2_t, 0) as fossil_co2_t,
+                   COALESCE(biogenic_co2_t, 0) as biogenic_co2_t, 
+                   COALESCE(comment, '') as comment,
+                   ${hasProminent ? 'COALESCE(is_prominent, false) as is_prominent,' : 'false as is_prominent,'}
+                   ${hasPinSize ? 'COALESCE(pin_size, 2) as pin_size,' : '2 as pin_size,'}
+                   ${hasPinColor ? 'COALESCE(pin_color, \'#ff0000\') as pin_color,' : '\'#ff0000\' as pin_color,'}
         `;
+        
+        if (hasPostGIS && hasGeom) {
+            query += `
+                   ST_X(geom) as longitude, 
+                   ST_Y(geom) as latitude
+            FROM co2_sources
+            WHERE geom IS NOT NULL
+            `;
+        } else if (hasLongitude && hasLatitude) {
+            query += `
+                   longitude, 
+                   latitude
+            FROM co2_sources
+            WHERE longitude IS NOT NULL AND latitude IS NOT NULL
+            `;
+        } else {
+            // No geographic data available
+            query += `
+                   0 as longitude, 
+                   0 as latitude
+            FROM co2_sources
+            `;
+        }
         
         const params = [];
         
-        // Add bounding box filter for performance
-        if (bbox) {
+        // Add bounding box filter if PostGIS is available
+        if (bbox && hasPostGIS && hasGeom) {
             const [minLng, minLat, maxLng, maxLat] = bbox.split(',').map(Number);
             query += ` AND geom && ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326)`;
             params.push(minLng, minLat, maxLng, maxLat);
         }
         
-        query += ` ORDER BY is_prominent DESC NULLS LAST, total_co2_t DESC NULLS LAST`;
+        query += ` ORDER BY total_co2_t DESC NULLS LAST`;
         
         // Limit results at low zoom levels for performance
         if (zoom && parseInt(zoom) < 10) {
@@ -337,30 +421,42 @@ app.get('/api/co2-sources-enhanced', async (req, res) => {
     }
 });
 
-// Updated voting districts endpoint
+// Voting districts endpoint with fallbacks
 app.get('/api/voting-districts-choropleth', async (req, res) => {
     try {
+        if (!(await tableExists('voting_districts'))) {
+            return res.json([]);
+        }
+
         const { simplify } = req.query;
+        const hasGeom = await columnExists('voting_districts', 'geom');
+        
+        if (!hasPostGIS || !hasGeom) {
+            return res.json([]);
+        }
+        
         const tolerance = simplify === 'true' ? 0.001 : 0;
         
         const query = `
-            SELECT vd.id, vd.gkz, vd.name, 
-                   vd.spo_percent, vd.ovp_percent, vd.fpo_percent,
-                   vd.grune_percent, vd.kpo_percent, vd.neos_percent,
-                   vd.left_green_combined, 
+            SELECT vd.id, 
+                   COALESCE(vd.gkz, '') as gkz, 
+                   COALESCE(vd.name, '') as name, 
+                   COALESCE(vd.spo_percent, 0) as spo_percent, 
+                   COALESCE(vd.ovp_percent, 0) as ovp_percent, 
+                   COALESCE(vd.fpo_percent, 0) as fpo_percent,
+                   COALESCE(vd.grune_percent, 0) as grune_percent, 
+                   COALESCE(vd.kpo_percent, 0) as kpo_percent, 
+                   COALESCE(vd.neos_percent, 0) as neos_percent,
+                   COALESCE(vd.left_green_combined, 0) as left_green_combined, 
                    COALESCE(vd.choropleth_color, '#cccccc') as fill_color,
                    ${tolerance > 0 
                      ? `ST_AsGeoJSON(ST_Simplify(ST_Transform(vd.geom, 4326), ${tolerance}))` 
                      : 'ST_AsGeoJSON(ST_Transform(vd.geom, 4326))'
                    } as geometry,
                    ST_X(ST_Transform(ST_Centroid(vd.geom), 4326)) as center_lng,
-                   ST_Y(ST_Transform(ST_Centroid(vd.geom), 4326)) as center_lat,
-                   ST_IsValid(vd.geom) as geom_valid,
-                   CASE WHEN vd.spo_percent > 0 OR vd.ovp_percent > 0 OR vd.fpo_percent > 0 OR 
-                             vd.grune_percent > 0 OR vd.kpo_percent > 0 OR vd.neos_percent > 0 
-                        THEN true ELSE false END as has_voting_data
+                   ST_Y(ST_Transform(ST_Centroid(vd.geom), 4326)) as center_lat
             FROM voting_districts vd
-            WHERE vd.geom IS NOT NULL AND ST_IsValid(vd.geom) = true
+            WHERE vd.geom IS NOT NULL
             ORDER BY vd.left_green_combined DESC NULLS LAST
         `;
         
@@ -377,30 +473,69 @@ app.get('/api/voting-districts-choropleth', async (req, res) => {
     }
 });
 
-// Generic endpoint for point-based layers with clustering support
+// Generic endpoint for point-based layers with enhanced fallbacks
 const createPointLayerEndpoint = (tableName, fields, orderBy = 'id') => {
     return async (req, res) => {
         try {
+            if (!(await tableExists(tableName))) {
+                return res.json([]);
+            }
+
             const { bbox, zoom } = req.query;
-            let query = `
-                SELECT ${fields.join(', ')},
+            const hasGeom = await columnExists(tableName, 'geom');
+            const hasLongitude = await columnExists(tableName, 'longitude');
+            const hasLatitude = await columnExists(tableName, 'latitude');
+            
+            // Build base fields, checking if each exists
+            const safeFields = [];
+            for (const field of fields) {
+                // Extract column name from field (handle COALESCE statements)
+                const columnName = field.includes('(') ? 
+                    field.split('(')[1].split(',')[0].trim() : 
+                    field.split(' as ')[0].trim();
+                
+                if (field.includes('COALESCE') || await columnExists(tableName, columnName)) {
+                    safeFields.push(field);
+                }
+            }
+            
+            let query = `SELECT ${safeFields.join(', ')},`;
+            
+            if (hasPostGIS && hasGeom) {
+                query += `
                        ST_X(ST_Transform(geom, 4326)) as longitude, 
-                       ST_Y(ST_Transform(geom, 4326)) as latitude,
-                       ST_IsValid(geom) as geom_valid
+                       ST_Y(ST_Transform(geom, 4326)) as latitude
                 FROM ${tableName}
-                WHERE geom IS NOT NULL AND ST_IsValid(geom) = true
-            `;
+                WHERE geom IS NOT NULL
+                `;
+            } else if (hasLongitude && hasLatitude) {
+                query += `
+                       longitude, 
+                       latitude
+                FROM ${tableName}
+                WHERE longitude IS NOT NULL AND latitude IS NOT NULL
+                `;
+            } else {
+                query += `
+                       0 as longitude, 
+                       0 as latitude
+                FROM ${tableName}
+                `;
+            }
             
             const params = [];
             
-            // Add bounding box filter
-            if (bbox) {
+            // Add bounding box filter if PostGIS is available
+            if (bbox && hasPostGIS && hasGeom) {
                 const [minLng, minLat, maxLng, maxLat] = bbox.split(',').map(Number);
                 query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), ST_SRID(geom))`;
                 params.push(minLng, minLat, maxLng, maxLat);
             }
             
-            query += ` ORDER BY ${orderBy}`;
+            // Check if orderBy column exists
+            if (await columnExists(tableName, orderBy)) {
+                query += ` ORDER BY ${orderBy}`;
+            }
             
             // Add limit for performance at low zoom levels
             if (zoom && parseInt(zoom) < 8) {
@@ -421,119 +556,99 @@ const createPointLayerEndpoint = (tableName, fields, orderBy = 'id') => {
     };
 };
 
-// Point-based layer endpoints
+// Point-based layer endpoints with fallback-safe fields
 app.get('/api/landfills-enhanced', createPointLayerEndpoint('landfills', [
-    'id', 'company_name', 'location_name', 'district', 'address', 'facility_type',
-    'COALESCE(pin_size, 2) as pin_size', 
-    'COALESCE(pin_color, \'#ff8800\') as pin_color',
-    'COALESCE(opacity, 0.8) as opacity'
+    'id', 
+    'COALESCE(company_name, \'\') as company_name', 
+    'COALESCE(location_name, \'\') as location_name', 
+    'COALESCE(district, \'\') as district', 
+    'COALESCE(address, \'\') as address', 
+    'COALESCE(facility_type, \'\') as facility_type',
+    '2 as pin_size', 
+    '\'#ff8800\' as pin_color',
+    '0.8 as opacity'
 ]));
 
 app.get('/api/gravel-pits-enhanced', createPointLayerEndpoint('gravel_pits', [
-    'id', 'name', 'resource', 'tags',
-    'COALESCE(pin_size, 2) as pin_size', 
-    'COALESCE(pin_color, \'#8855aa\') as pin_color',
-    'COALESCE(opacity, 0.7) as opacity'
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(resource, \'\') as resource', 
+    'COALESCE(tags, \'\') as tags',
+    '2 as pin_size', 
+    '\'#8855aa\' as pin_color',
+    '0.7 as opacity'
 ]));
 
 app.get('/api/wastewater-plants-enhanced', createPointLayerEndpoint('wastewater_plants', [
-    'id', 'pk', 'label', 'treatment_type', 'capacity',
-    'COALESCE(pin_size, 2) as pin_size', 
-    'COALESCE(pin_color, \'#3388ff\') as pin_color',
-    'COALESCE(opacity, 0.6) as opacity'
+    'id', 
+    'COALESCE(pk, 0) as pk', 
+    'COALESCE(label, \'\') as label', 
+    'COALESCE(treatment_type, \'\') as treatment_type', 
+    'COALESCE(capacity, 0) as capacity',
+    '2 as pin_size', 
+    '\'#3388ff\' as pin_color',
+    '0.6 as opacity'
 ]));
 
 app.get('/api/gas-storage-sites-enhanced', createPointLayerEndpoint('gas_storage_sites', [
-    'id', 'name', 'operator', 'storage_type', 'capacity_bcm',
-    'COALESCE(pin_size, 2) as pin_size', 
-    'COALESCE(pin_color, \'#00cc88\') as pin_color',
-    'COALESCE(opacity, 0.5) as opacity'
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(operator, \'\') as operator', 
+    'COALESCE(storage_type, \'\') as storage_type', 
+    'COALESCE(capacity_bcm, 0) as capacity_bcm',
+    '2 as pin_size', 
+    '\'#00cc88\' as pin_color',
+    '0.5 as opacity'
 ]));
 
 app.get('/api/gas-distribution-points-enhanced', createPointLayerEndpoint('gas_distribution_points', [
-    'id', 'name', 'type', 'operator',
-    'COALESCE(pin_size, 1) as pin_size', 
-    'COALESCE(pin_color, \'#00aa44\') as pin_color',
-    'COALESCE(opacity, 0.4) as opacity'
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(type, \'\') as type', 
+    'COALESCE(operator, \'\') as operator',
+    '1 as pin_size', 
+    '\'#00aa44\' as pin_color',
+    '0.4 as opacity'
 ]));
 
 app.get('/api/compressor-stations-enhanced', createPointLayerEndpoint('compressor_stations', [
-    'id', 'name', 'operator', 'capacity_info',
-    'COALESCE(pin_size, 2) as pin_size', 
-    'COALESCE(pin_color, \'#ffaa00\') as pin_color',
-    'COALESCE(opacity, 0.3) as opacity'
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(operator, \'\') as operator', 
+    'COALESCE(capacity_info, \'\') as capacity_info',
+    '2 as pin_size', 
+    '\'#ffaa00\' as pin_color',
+    '0.3 as opacity'
 ]));
 
-// Generic endpoint for line-based layers
+// Generic endpoint for line-based layers with fallbacks
 const createLineLayerEndpoint = (tableName, fields) => {
     return async (req, res) => {
         try {
+            if (!(await tableExists(tableName))) {
+                return res.json([]);
+            }
+
+            const hasGeom = await columnExists(tableName, 'geom');
+            
+            if (!hasPostGIS || !hasGeom) {
+                return res.json([]);
+            }
+
             const { bbox, simplify } = req.query;
             const tolerance = simplify === 'true' ? 0.001 : 0;
             
-            let geomField = 'geom';
-            if (tolerance > 0) {
-                geomField = `ST_Simplify(geom, ${tolerance})`;
+            // Build safe fields
+            const safeFields = [];
+            for (const field of fields) {
+                const columnName = field.includes('(') ? 
+                    field.split('(')[1].split(',')[0].trim() : 
+                    field.split(' as ')[0].trim();
+                
+                if (field.includes('COALESCE') || await columnExists(tableName, columnName)) {
+                    safeFields.push(field);
+                }
             }
-            
-            let query = `
-                SELECT ${fields.join(', ')},
-                       ST_AsGeoJSON(ST_Transform(${geomField}, 4326)) as geometry,
-                       ST_IsValid(geom) as geom_valid
-                FROM ${tableName}
-                WHERE geom IS NOT NULL AND ST_IsValid(geom) = true
-            `;
-            
-            const params = [];
-            
-            if (bbox) {
-                const [minLng, minLat, maxLng, maxLat] = bbox.split(',').map(Number);
-                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), ST_SRID(geom))`;
-                params.push(minLng, minLat, maxLng, maxLat);
-            }
-            
-            const result = await pool.query(query, params);
-            
-            console.log(`Retrieved ${result.rows.length} ${tableName.replace('_', ' ')}`);
-            res.json(result.rows);
-        } catch (error) {
-            console.error(`Error fetching ${tableName}:`, error);
-            res.status(500).json({ 
-                error: `Failed to fetch ${tableName.replace('_', ' ')}`,
-                details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
-            });
-        }
-    };
-};
-
-// Line-based layer endpoints
-app.get('/api/gas-pipelines-enhanced', createLineLayerEndpoint('gas_pipelines', [
-    'id', 'name', 'operator', 'diameter', 'pressure_level', 'pipeline_type',
-    'COALESCE(line_color, \'#00aa44\') as line_color', 
-    'COALESCE(line_weight, 4) as line_weight', 
-    'COALESCE(line_opacity, 0.8) as line_opacity'
-]));
-
-app.get('/api/highways', createLineLayerEndpoint('highways', [
-    'id', 'name', 'highway_number', 'road_type',
-    'COALESCE(line_color, \'#666666\') as line_color', 
-    'COALESCE(line_weight, 3) as line_weight', 
-    'COALESCE(line_opacity, 0.7) as line_opacity'
-]));
-
-app.get('/api/railways', createLineLayerEndpoint('railways', [
-    'id', 'name', 'railway_type', 'operator',
-    'COALESCE(line_color, \'#8B4513\') as line_color', 
-    'COALESCE(line_weight, 3) as line_weight', 
-    'COALESCE(line_opacity, 0.8) as line_opacity'
-]));
-
-// Generic endpoint for polygon-based layers
-const createPolygonLayerEndpoint = (tableName, fields) => {
-    return async (req, res) => {
-        try {
-            const { bbox, simplify } = req.query;
-            const tolerance = simplify === 'true' ? 0.002 : 0; // Larger tolerance for polygons
             
             let geomField = 'geom';
             if (tolerance > 0) {
@@ -541,18 +656,17 @@ const createPolygonLayerEndpoint = (tableName, fields) => {
             }
             
             let query = `
-                SELECT ${fields.join(', ')},
-                       ST_AsGeoJSON(ST_Transform(${geomField}, 4326)) as geometry,
-                       ST_IsValid(geom) as geom_valid
+                SELECT ${safeFields.join(', ')},
+                       ST_AsGeoJSON(ST_Transform(${geomField}, 4326)) as geometry
                 FROM ${tableName}
-                WHERE geom IS NOT NULL AND ST_IsValid(geom) = true
+                WHERE geom IS NOT NULL
             `;
             
             const params = [];
             
             if (bbox) {
                 const [minLng, minLat, maxLng, maxLat] = bbox.split(',').map(Number);
-                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), ST_SRID(geom))`;
+                query += ` AND geom && ST_Transform(ST_MakeEnvelope(${params.length + 1}, ${params.length + 2}, ${params.length + 3}, ${params.length + 4}, 4326), ST_SRID(geom))`;
                 params.push(minLng, minLat, maxLng, maxLat);
             }
             
@@ -572,30 +686,38 @@ const createPolygonLayerEndpoint = (tableName, fields) => {
 
 // Polygon-based layer endpoints
 app.get('/api/groundwater-protection', createPolygonLayerEndpoint('groundwater_protection', [
-    'id', 'name', 'protection_zone',
-    'COALESCE(fill_color, \'#0066ff\') as fill_color', 
-    'COALESCE(fill_opacity, 0.3) as fill_opacity', 
-    'COALESCE(border_color, \'#0044cc\') as border_color', 
-    'COALESCE(border_weight, 2) as border_weight'
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(protection_zone, \'\') as protection_zone',
+    '\'#0066ff\' as fill_color', 
+    '0.3 as fill_opacity', 
+    '\'#0044cc\' as border_color', 
+    '2 as border_weight'
 ]));
 
 app.get('/api/conservation-areas', createPolygonLayerEndpoint('conservation_areas', [
-    'id', 'name', 'protection_level', 'area_type',
-    'COALESCE(fill_color, \'#00ff00\') as fill_color', 
-    'COALESCE(fill_opacity, 0.3) as fill_opacity', 
-    'COALESCE(border_color, \'#00cc00\') as border_color', 
-    'COALESCE(border_weight, 2) as border_weight'
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(protection_level, \'\') as protection_level', 
+    'COALESCE(area_type, \'\') as area_type',
+    '\'#00ff00\' as fill_color', 
+    '0.3 as fill_opacity', 
+    '\'#00cc00\' as border_color', 
+    '2 as border_weight'
 ]));
 
 app.get('/api/settlement-areas', createPolygonLayerEndpoint('settlement_areas', [
-    'id', 'name', 'area_type', 'population',
-    'COALESCE(fill_color, \'#ff0000\') as fill_color', 
-    'COALESCE(fill_opacity, 0.3) as fill_opacity', 
-    'COALESCE(border_color, \'#cc0000\') as border_color', 
-    'COALESCE(border_weight, 2) as border_weight'
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(area_type, \'\') as area_type', 
+    'COALESCE(population, 0) as population',
+    '\'#ff0000\' as fill_color', 
+    '0.3 as fill_opacity', 
+    '\'#cc0000\' as border_color', 
+    '2 as border_weight'
 ]));
 
-// Database stats endpoint
+// Database stats endpoint with table existence checks
 app.get('/api/database-stats', async (req, res) => {
     try {
         const tables = [
@@ -609,14 +731,28 @@ app.get('/api/database-stats', async (req, res) => {
         const stats = {};
         for (const table of tables) {
             try {
+                if (!(await tableExists(table))) {
+                    stats[table] = { total: 0, validGeometry: 0, exists: false };
+                    continue;
+                }
+                
                 const countResult = await pool.query(`SELECT COUNT(*) as count FROM ${table}`);
-                const validGeomResult = await pool.query(`SELECT COUNT(*) as count FROM ${table} WHERE geom IS NOT NULL AND ST_IsValid(geom) = true`);
+                
+                let validGeomCount = 0;
+                const hasGeom = await columnExists(table, 'geom');
+                if (hasPostGIS && hasGeom) {
+                    const validGeomResult = await pool.query(`SELECT COUNT(*) as count FROM ${table} WHERE geom IS NOT NULL`);
+                    validGeomCount = parseInt(validGeomResult.rows[0].count);
+                }
+                
                 stats[table] = {
                     total: parseInt(countResult.rows[0].count),
-                    validGeometry: parseInt(validGeomResult.rows[0].count)
+                    validGeometry: validGeomCount,
+                    exists: true,
+                    hasGeometry: hasGeom
                 };
             } catch (error) {
-                stats[table] = { total: 0, validGeometry: 0, error: error.message };
+                stats[table] = { total: 0, validGeometry: 0, exists: false, error: error.message };
             }
         }
         
@@ -630,9 +766,13 @@ app.get('/api/database-stats', async (req, res) => {
     }
 });
 
-// Layer styles endpoint
+// Layer styles endpoint with table existence check
 app.get('/api/layer-styles', async (req, res) => {
     try {
+        if (!(await tableExists('layer_styles'))) {
+            return res.json([]);
+        }
+        
         const query = 'SELECT * FROM layer_styles WHERE is_active = true';
         const result = await pool.query(query);
         res.json(result.rows);
@@ -666,6 +806,10 @@ app.post('/api/admin/co2-sources', [
             return res.status(400).json({ errors: errors.array() });
         }
 
+        if (!(await tableExists('co2_sources'))) {
+            return res.status(503).json({ error: 'CO2 sources table not available' });
+        }
+
         const {
             plant_name, plant_type, total_co2_t, fossil_co2_t,
             biogenic_co2_t, latitude, longitude, comment
@@ -674,27 +818,49 @@ app.post('/api/admin/co2-sources', [
         const isProminent = total_co2_t > 50000;
         const pinSize = isProminent ? 4 : 2;
 
-        const result = await pool.query(`
-            INSERT INTO co2_sources (
+        let query, values;
+        
+        if (hasPostGIS && await columnExists('co2_sources', 'geom')) {
+            query = `
+                INSERT INTO co2_sources (
+                    plant_name, plant_type, total_co2_t, fossil_co2_t,
+                    biogenic_co2_t, comment, is_prominent, pin_size, geom
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 
+                    ST_SetSRID(ST_MakePoint($9, $10), 4326))
+                RETURNING *
+            `;
+            values = [
                 plant_name, plant_type, total_co2_t, fossil_co2_t,
-                biogenic_co2_t, comment, is_prominent, pin_size,
-                geom, properties
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 
-                ST_SetSRID(ST_MakePoint($9, $10), 4326), $11)
-            RETURNING *
-        `, [
-            plant_name, plant_type, total_co2_t, fossil_co2_t,
-            biogenic_co2_t, comment || '', isProminent, pinSize,
-            longitude, latitude,
-            JSON.stringify({ created_by: req.user.username })
-        ]);
+                biogenic_co2_t, comment || '', isProminent, pinSize,
+                longitude, latitude
+            ];
+        } else {
+            // Fallback without PostGIS
+            query = `
+                INSERT INTO co2_sources (
+                    plant_name, plant_type, total_co2_t, fossil_co2_t,
+                    biogenic_co2_t, comment, is_prominent, pin_size,
+                    longitude, latitude
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING *
+            `;
+            values = [
+                plant_name, plant_type, total_co2_t, fossil_co2_t,
+                biogenic_co2_t, comment || '', isProminent, pinSize,
+                longitude, latitude
+            ];
+        }
+
+        const result = await pool.query(query, values);
 
         // Log to audit table if it exists
         try {
-            await pool.query(`
-                INSERT INTO audit_log (table_name, record_id, action, new_values, user_id)
-                VALUES ($1, $2, $3, $4, $5)
-            `, ['co2_sources', result.rows[0].id, 'INSERT', JSON.stringify(req.body), req.user.id]);
+            if (await tableExists('audit_log')) {
+                await pool.query(`
+                    INSERT INTO audit_log (table_name, record_id, action, new_values, user_id)
+                    VALUES ($1, $2, $3, $4, $5)
+                `, ['co2_sources', result.rows[0].id, 'INSERT', JSON.stringify(req.body), req.user.id]);
+            }
         } catch (auditError) {
             console.log('Audit logging not available:', auditError.message);
         }
@@ -723,6 +889,10 @@ app.put('/api/admin/co2-sources/:id', [
         const { id } = req.params;
         const updates = req.body;
 
+        if (!(await tableExists('co2_sources'))) {
+            return res.status(503).json({ error: 'CO2 sources table not available' });
+        }
+
         // Get old values for audit
         const oldRecord = await pool.query('SELECT * FROM co2_sources WHERE id = $1', [id]);
         if (oldRecord.rows.length === 0) {
@@ -743,8 +913,12 @@ app.put('/api/admin/co2-sources/:id', [
             paramIndex++;
         });
 
-        if (updates.latitude && updates.longitude) {
+        if (updates.latitude && updates.longitude && hasPostGIS && await columnExists('co2_sources', 'geom')) {
             setClauses.push(`geom = ST_SetSRID(ST_MakePoint(${paramIndex}, ${paramIndex + 1}), 4326)`);
+            values.push(updates.longitude, updates.latitude);
+            paramIndex += 2;
+        } else if (updates.latitude && updates.longitude) {
+            setClauses.push(`longitude = ${paramIndex}, latitude = ${paramIndex + 1}`);
             values.push(updates.longitude, updates.latitude);
             paramIndex += 2;
         }
@@ -765,10 +939,12 @@ app.put('/api/admin/co2-sources/:id', [
 
         // Log to audit table if it exists
         try {
-            await pool.query(`
-                INSERT INTO audit_log (table_name, record_id, action, old_values, new_values, user_id)
-                VALUES ($1, $2, $3, $4, $5, $6)
-            `, ['co2_sources', id, 'UPDATE', JSON.stringify(oldRecord.rows[0]), JSON.stringify(updates), req.user.id]);
+            if (await tableExists('audit_log')) {
+                await pool.query(`
+                    INSERT INTO audit_log (table_name, record_id, action, old_values, new_values, user_id)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                `, ['co2_sources', id, 'UPDATE', JSON.stringify(oldRecord.rows[0]), JSON.stringify(updates), req.user.id]);
+            }
         } catch (auditError) {
             console.log('Audit logging not available:', auditError.message);
         }
@@ -785,6 +961,10 @@ app.delete('/api/admin/co2-sources/:id', adminLimiter, authenticateToken, async 
     try {
         const { id } = req.params;
 
+        if (!(await tableExists('co2_sources'))) {
+            return res.status(503).json({ error: 'CO2 sources table not available' });
+        }
+
         // Get record for audit
         const oldRecord = await pool.query('SELECT * FROM co2_sources WHERE id = $1', [id]);
         if (oldRecord.rows.length === 0) {
@@ -795,10 +975,12 @@ app.delete('/api/admin/co2-sources/:id', adminLimiter, authenticateToken, async 
 
         // Log to audit table if it exists
         try {
-            await pool.query(`
-                INSERT INTO audit_log (table_name, record_id, action, old_values, user_id)
-                VALUES ($1, $2, $3, $4, $5)
-            `, ['co2_sources', id, 'DELETE', JSON.stringify(oldRecord.rows[0]), req.user.id]);
+            if (await tableExists('audit_log')) {
+                await pool.query(`
+                    INSERT INTO audit_log (table_name, record_id, action, old_values, user_id)
+                    VALUES ($1, $2, $3, $4, $5)
+                `, ['co2_sources', id, 'DELETE', JSON.stringify(oldRecord.rows[0]), req.user.id]);
+            }
         } catch (auditError) {
             console.log('Audit logging not available:', auditError.message);
         }
@@ -813,12 +995,29 @@ app.delete('/api/admin/co2-sources/:id', adminLimiter, authenticateToken, async 
 // Get existing CO2 sources for editing
 app.get('/api/admin/co2-sources', authenticateToken, async (req, res) => {
     try {
-        const result = await pool.query(`
-            SELECT id, plant_name, plant_type, total_co2_t, fossil_co2_t, biogenic_co2_t,
-                   comment, ST_X(geom) as longitude, ST_Y(geom) as latitude
-            FROM co2_sources 
-            ORDER BY plant_name
-        `);
+        if (!(await tableExists('co2_sources'))) {
+            return res.json([]);
+        }
+
+        const hasGeom = await columnExists('co2_sources', 'geom');
+        const hasLongitude = await columnExists('co2_sources', 'longitude');
+        const hasLatitude = await columnExists('co2_sources', 'latitude');
+        
+        let query = `
+            SELECT id, plant_name, plant_type, total_co2_t, fossil_co2_t, biogenic_co2_t, comment,
+        `;
+        
+        if (hasPostGIS && hasGeom) {
+            query += ` ST_X(geom) as longitude, ST_Y(geom) as latitude`;
+        } else if (hasLongitude && hasLatitude) {
+            query += ` longitude, latitude`;
+        } else {
+            query += ` 0 as longitude, 0 as latitude`;
+        }
+        
+        query += ` FROM co2_sources ORDER BY plant_name`;
+        
+        const result = await pool.query(query);
         res.json(result.rows);
     } catch (error) {
         console.error('Error fetching CO2 sources for admin:', error);
@@ -842,8 +1041,12 @@ app.post('/api/admin/optimize-database', adminLimiter, authenticateToken, async 
 
         for (const table of tables) {
             try {
-                await pool.query(`ANALYZE ${table}`);
-                optimizations.push(`Analyzed ${table}`);
+                if (await tableExists(table)) {
+                    await pool.query(`ANALYZE ${table}`);
+                    optimizations.push(`Analyzed ${table}`);
+                } else {
+                    optimizations.push(`Skipped ${table} (table does not exist)`);
+                }
             } catch (error) {
                 optimizations.push(`Failed to analyze ${table}: ${error.message}`);
             }
@@ -862,6 +1065,10 @@ app.post('/api/admin/optimize-database', adminLimiter, authenticateToken, async 
 // Get audit log if table exists
 app.get('/api/admin/audit-log', adminLimiter, authenticateToken, async (req, res) => {
     try {
+        if (!(await tableExists('audit_log'))) {
+            return res.json([]);
+        }
+
         const { limit = 100, offset = 0, table_name } = req.query;
         
         let query = `
@@ -948,10 +1155,11 @@ const gracefulShutdown = (signal) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Start server with enhanced logging
+// Start server with enhanced logging and PostGIS detection
 const startServer = async () => {
     try {
         await testDatabaseConnection();
+        hasPostGIS = await checkPostGIS();
         
         app.listen(PORT, '0.0.0.0', () => {
             console.log(`
@@ -963,23 +1171,20 @@ Port: ${PORT}
 Database: ${process.env.DB_NAME || 'co2_storage_atlas'}
 Host: ${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || 5432}
 DATABASE_URL: ${process.env.DATABASE_URL ? 'Configured' : 'Not configured'}
+PostGIS: ${hasPostGIS ? 'Available' : 'Not available'}
 JWT Secret: ${process.env.JWT_SECRET ? 'Configured' : 'Using default'}
 SSL: ${process.env.NODE_ENV === 'production' ? 'Enabled' : 'Disabled'}
 ========================================
 Features:
-- Performance optimized queries
-- Clustering support with bbox filtering
-- Area filtering for large datasets
-- Admin authentication with JWT
-- Rate limiting for security
-- PostgreSQL with PostGIS
-- Production-ready error handling
-- Graceful shutdown handling
-- Enhanced database connection retry
+- Enhanced error handling for missing tables/columns
+- PostGIS detection with fallbacks
+- Table existence validation
+- Production-ready for Render deployment
+- Graceful degradation when features unavailable
 ========================================
 Health Check: /api/health
 Info Endpoint: /api/info
-Main App: ${process.env.NODE_ENV === 'production' ? 'https://co2-storage-atlas-1.onrender.com' : `http://localhost:${PORT}`}
+Main App: ${process.env.NODE_ENV === 'production' ? 'https://your-app.onrender.com' : `http://localhost:${PORT}`}
 ========================================
             `);
         });
@@ -993,4 +1198,100 @@ Main App: ${process.env.NODE_ENV === 'production' ? 'https://co2-storage-atlas-1
 
 startServer();
 
-module.exports = app;
+module.exports = app;].trim();
+                
+                if (field.includes('COALESCE') || await columnExists(tableName, columnName)) {
+                    safeFields.push(field);
+                }
+            }
+            
+            let geomField = 'geom';
+            if (tolerance > 0) {
+                geomField = `ST_Simplify(geom, ${tolerance})`;
+            }
+            
+            let query = `
+                SELECT ${safeFields.join(', ')},
+                       ST_AsGeoJSON(ST_Transform(${geomField}, 4326)) as geometry
+                FROM ${tableName}
+                WHERE geom IS NOT NULL
+            `;
+            
+            const params = [];
+            
+            if (bbox) {
+                const [minLng, minLat, maxLng, maxLat] = bbox.split(',').map(Number);
+                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), ST_SRID(geom))`;
+                params.push(minLng, minLat, maxLng, maxLat);
+            }
+            
+            const result = await pool.query(query, params);
+            
+            console.log(`Retrieved ${result.rows.length} ${tableName.replace('_', ' ')}`);
+            res.json(result.rows);
+        } catch (error) {
+            console.error(`Error fetching ${tableName}:`, error);
+            res.status(500).json({ 
+                error: `Failed to fetch ${tableName.replace('_', ' ')}`,
+                details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+            });
+        }
+    };
+};
+
+// Line-based layer endpoints
+app.get('/api/gas-pipelines-enhanced', createLineLayerEndpoint('gas_pipelines', [
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(operator, \'\') as operator', 
+    'COALESCE(diameter, \'\') as diameter', 
+    'COALESCE(pressure_level, \'\') as pressure_level', 
+    'COALESCE(pipeline_type, \'\') as pipeline_type',
+    '\'#00aa44\' as line_color', 
+    '4 as line_weight', 
+    '0.8 as line_opacity'
+]));
+
+app.get('/api/highways', createLineLayerEndpoint('highways', [
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(highway_number, \'\') as highway_number', 
+    'COALESCE(road_type, \'\') as road_type',
+    '\'#666666\' as line_color', 
+    '3 as line_weight', 
+    '0.7 as line_opacity'
+]));
+
+app.get('/api/railways', createLineLayerEndpoint('railways', [
+    'id', 
+    'COALESCE(name, \'\') as name', 
+    'COALESCE(railway_type, \'\') as railway_type', 
+    'COALESCE(operator, \'\') as operator',
+    '\'#8B4513\' as line_color', 
+    '3 as line_weight', 
+    '0.8 as line_opacity'
+]));
+
+// Generic endpoint for polygon-based layers with fallbacks
+const createPolygonLayerEndpoint = (tableName, fields) => {
+    return async (req, res) => {
+        try {
+            if (!(await tableExists(tableName))) {
+                return res.json([]);
+            }
+
+            const hasGeom = await columnExists(tableName, 'geom');
+            
+            if (!hasPostGIS || !hasGeom) {
+                return res.json([]);
+            }
+
+            const { bbox, simplify } = req.query;
+            const tolerance = simplify === 'true' ? 0.002 : 0; // Larger tolerance for polygons
+            
+            // Build safe fields
+            const safeFields = [];
+            for (const field of fields) {
+                const columnName = field.includes('(') ? 
+                    field.split('(')[1].split(',')[0].trim() : 
+                    field.split(' as ')[0
