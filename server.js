@@ -14,7 +14,7 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Database connection pool with optimizations
+// Database connection pool with production optimizations
 const pool = new Pool({
     host: process.env.DB_HOST || 'localhost',
     port: process.env.DB_PORT || 5432,
@@ -25,35 +25,60 @@ const pool = new Pool({
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
     allowExitOnIdle: true,
+    // SSL configuration for production (required for Render PostgreSQL)
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
     // Performance optimizations
     query_timeout: 60000,
     statement_timeout: 60000,
     application_name: 'co2_storage_atlas'
 });
 
-// Test database connection
+// Test database connection with better error handling
 pool.on('connect', (client) => {
     console.log('Connected to PostgreSQL database');
 });
 
 pool.on('error', (err) => {
     console.error('Database connection error:', err);
+    // Don't exit process in production, let health check handle it
+    if (process.env.NODE_ENV !== 'production') {
+        process.exit(1);
+    }
 });
 
-// Rate limiting
+// Test initial connection
+const testDatabaseConnection = async () => {
+    try {
+        const client = await pool.connect();
+        await client.query('SELECT NOW()');
+        client.release();
+        console.log('Database connection test successful');
+    } catch (error) {
+        console.error('Database connection test failed:', error);
+        if (process.env.NODE_ENV !== 'production') {
+            process.exit(1);
+        }
+    }
+};
+
+// Rate limiting with more appropriate limits for production
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 1000, // Limit each IP to 1000 requests per windowMs
-    message: 'Too many requests from this IP, please try again later.'
+    max: process.env.NODE_ENV === 'production' ? 500 : 1000, // Lower limit in production
+    message: 'Too many requests from this IP, please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
 const adminLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit admin operations
-    message: 'Too many admin requests from this IP, please try again later.'
+    max: 50, // Strict limit for admin operations
+    message: 'Too many admin requests from this IP, please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
-// Middleware
+// Middleware with production-ready configuration
 app.use(helmet({ 
     contentSecurityPolicy: {
         directives: {
@@ -61,22 +86,48 @@ app.use(helmet({
             styleSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com"],
             scriptSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://cdnjs.cloudflare.com"],
             imgSrc: ["'self'", "data:", "https:", "blob:"],
-            connectSrc: ["'self'"]
+            connectSrc: ["'self'"],
+            fontSrc: ["'self'", "https:"],
+            objectSrc: ["'none'"],
+            mediaSrc: ["'self'"],
+            frameSrc: ["'none'"],
         }
-    }
+    },
+    crossOriginEmbedderPolicy: false
 }));
+
 app.use(compression());
+
+// CORS configuration for production
 app.use(cors({
-    origin: process.env.NODE_ENV === 'production' ? false : true,
-    credentials: true
+    origin: process.env.NODE_ENV === 'production' 
+        ? [
+            process.env.FRONTEND_URL,
+            /\.onrender\.com$/,
+            /localhost:\d+$/
+          ] 
+        : true,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with']
 }));
-app.use(morgan('combined'));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(express.json({ limit: '10mb' })); // Reduced limit for production
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(generalLimiter);
 
-// Serve static files
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files with proper caching headers
+app.use(express.static(path.join(__dirname, 'public'), {
+    maxAge: process.env.NODE_ENV === 'production' ? '1d' : '0',
+    etag: true,
+    lastModified: true
+}));
+
+// Trust proxy for Render
+if (process.env.NODE_ENV === 'production') {
+    app.set('trust proxy', 1);
+}
 
 // JWT Authentication middleware
 const authenticateToken = (req, res, next) => {
@@ -87,7 +138,7 @@ const authenticateToken = (req, res, next) => {
         return res.status(401).json({ error: 'Access token required' });
     }
 
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret', (err, user) => {
         if (err) {
             return res.status(403).json({ error: 'Invalid token' });
         }
@@ -96,17 +147,26 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// Health check endpoint
+// Health check endpoint - enhanced for Render
 app.get('/api/health', async (req, res) => {
     try {
         const result = await pool.query('SELECT NOW() as timestamp, version() as version');
         const dbCheck = await pool.query('SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = $1', ['public']);
         
         // Check PostGIS availability
-        const postgisCheck = await pool.query(`
-            SELECT PostGIS_Version() as postgis_version,
-                   ST_IsValid(ST_MakePoint(13.5, 47.8)) as geom_test
-        `);
+        let postgisInfo = null;
+        try {
+            const postgisCheck = await pool.query(`
+                SELECT PostGIS_Version() as postgis_version,
+                       ST_IsValid(ST_MakePoint(13.5, 47.8)) as geom_test
+            `);
+            postgisInfo = {
+                version: postgisCheck.rows[0].postgis_version,
+                geometry_test: postgisCheck.rows[0].geom_test
+            };
+        } catch (postgisError) {
+            postgisInfo = { error: 'PostGIS not available' };
+        }
         
         res.json({ 
             status: 'OK', 
@@ -114,16 +174,18 @@ app.get('/api/health', async (req, res) => {
             database: 'Connected',
             version: result.rows[0].version,
             tables: parseInt(dbCheck.rows[0].table_count),
-            postgis: postgisCheck.rows[0].postgis_version,
-            geometry_test: postgisCheck.rows[0].geom_test,
-            environment: process.env.NODE_ENV || 'development'
+            postgis: postgisInfo,
+            environment: process.env.NODE_ENV || 'development',
+            port: PORT,
+            uptime: process.uptime()
         });
     } catch (error) {
         console.error('Health check failed:', error);
         res.status(503).json({ 
             status: 'ERROR', 
             error: error.message,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            environment: process.env.NODE_ENV || 'development'
         });
     }
 });
@@ -168,7 +230,7 @@ app.post('/api/auth/login', [
 
         const token = jwt.sign(
             { id: user.id, username: user.username },
-            process.env.JWT_SECRET,
+            process.env.JWT_SECRET || 'fallback-secret',
             { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
         );
 
@@ -223,12 +285,12 @@ app.get('/api/co2-sources-enhanced', async (req, res) => {
         console.error('Error fetching CO2 sources:', error);
         res.status(500).json({ 
             error: 'Failed to fetch CO2 sources',
-            details: error.message 
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
         });
     }
 });
 
-// Updated voting districts endpoint - now reads directly from shapefile data
+// Updated voting districts endpoint
 app.get('/api/voting-districts-choropleth', async (req, res) => {
     try {
         const { simplify } = req.query;
@@ -246,7 +308,10 @@ app.get('/api/voting-districts-choropleth', async (req, res) => {
                    } as geometry,
                    ST_X(ST_Transform(ST_Centroid(vd.geom), 4326)) as center_lng,
                    ST_Y(ST_Transform(ST_Centroid(vd.geom), 4326)) as center_lat,
-                   ST_IsValid(vd.geom) as geom_valid
+                   ST_IsValid(vd.geom) as geom_valid,
+                   CASE WHEN vd.spo_percent > 0 OR vd.ovp_percent > 0 OR vd.fpo_percent > 0 OR 
+                             vd.grune_percent > 0 OR vd.kpo_percent > 0 OR vd.neos_percent > 0 
+                        THEN true ELSE false END as has_voting_data
             FROM voting_districts vd
             WHERE vd.geom IS NOT NULL AND ST_IsValid(vd.geom) = true
             ORDER BY vd.left_green_combined DESC NULLS LAST
@@ -260,7 +325,7 @@ app.get('/api/voting-districts-choropleth', async (req, res) => {
         console.error('Error fetching voting districts:', error);
         res.status(500).json({ 
             error: 'Failed to fetch voting districts',
-            details: error.message 
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
         });
     }
 });
@@ -284,11 +349,16 @@ const createPointLayerEndpoint = (tableName, fields, orderBy = 'id') => {
             // Add bounding box filter
             if (bbox) {
                 const [minLng, minLat, maxLng, maxLat] = bbox.split(',').map(Number);
-                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), 4326)`;
+                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), ST_SRID(geom))`;
                 params.push(minLng, minLat, maxLng, maxLat);
             }
             
             query += ` ORDER BY ${orderBy}`;
+            
+            // Add limit for performance at low zoom levels
+            if (zoom && parseInt(zoom) < 8) {
+                query += ` LIMIT 500`;
+            }
             
             const result = await pool.query(query, params);
             
@@ -298,7 +368,7 @@ const createPointLayerEndpoint = (tableName, fields, orderBy = 'id') => {
             console.error(`Error fetching ${tableName}:`, error);
             res.status(500).json({ 
                 error: `Failed to fetch ${tableName.replace('_', ' ')}`,
-                details: error.message 
+                details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
             });
         }
     };
@@ -371,7 +441,7 @@ const createLineLayerEndpoint = (tableName, fields) => {
             
             if (bbox) {
                 const [minLng, minLat, maxLng, maxLat] = bbox.split(',').map(Number);
-                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), 4326)`;
+                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), ST_SRID(geom))`;
                 params.push(minLng, minLat, maxLng, maxLat);
             }
             
@@ -383,7 +453,7 @@ const createLineLayerEndpoint = (tableName, fields) => {
             console.error(`Error fetching ${tableName}:`, error);
             res.status(500).json({ 
                 error: `Failed to fetch ${tableName.replace('_', ' ')}`,
-                details: error.message 
+                details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
             });
         }
     };
@@ -435,7 +505,7 @@ const createPolygonLayerEndpoint = (tableName, fields) => {
             
             if (bbox) {
                 const [minLng, minLat, maxLng, maxLat] = bbox.split(',').map(Number);
-                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), 4326)`;
+                query += ` AND geom && ST_Transform(ST_MakeEnvelope($${params.length + 1}, $${params.length + 2}, $${params.length + 3}, $${params.length + 4}, 4326), ST_SRID(geom))`;
                 params.push(minLng, minLat, maxLng, maxLat);
             }
             
@@ -447,7 +517,7 @@ const createPolygonLayerEndpoint = (tableName, fields) => {
             console.error(`Error fetching ${tableName}:`, error);
             res.status(500).json({ 
                 error: `Failed to fetch ${tableName.replace('_', ' ')}`,
-                details: error.message 
+                details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
             });
         }
     };
@@ -508,7 +578,7 @@ app.get('/api/database-stats', async (req, res) => {
         console.error('Error fetching database stats:', error);
         res.status(500).json({ 
             error: 'Failed to fetch database statistics',
-            details: error.message 
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
         });
     }
 });
@@ -523,13 +593,13 @@ app.get('/api/layer-styles', async (req, res) => {
         console.error('Error fetching layer styles:', error);
         res.status(500).json({ 
             error: 'Failed to fetch layer styles',
-            details: error.message 
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
         });
     }
 });
 
 // ========================================
-// ADMIN ENDPOINTS - SIMPLIFIED (EDIT/DELETE ONLY)
+// ADMIN ENDPOINTS
 // ========================================
 
 // Add CO2 source
@@ -572,11 +642,15 @@ app.post('/api/admin/co2-sources', [
             JSON.stringify({ created_by: req.user.username })
         ]);
 
-        // Log to audit table
-        await pool.query(`
-            INSERT INTO audit_log (table_name, record_id, action, new_values, user_id)
-            VALUES ($1, $2, $3, $4, $5)
-        `, ['co2_sources', result.rows[0].id, 'INSERT', JSON.stringify(req.body), req.user.id]);
+        // Log to audit table if it exists
+        try {
+            await pool.query(`
+                INSERT INTO audit_log (table_name, record_id, action, new_values, user_id)
+                VALUES ($1, $2, $3, $4, $5)
+            `, ['co2_sources', result.rows[0].id, 'INSERT', JSON.stringify(req.body), req.user.id]);
+        } catch (auditError) {
+            console.log('Audit logging not available:', auditError.message);
+        }
 
         res.status(201).json(result.rows[0]);
     } catch (error) {
@@ -615,7 +689,6 @@ app.put('/api/admin/co2-sources/:id', [
 
         Object.keys(updates).forEach(key => {
             if (key === 'latitude' || key === 'longitude') {
-                // Handle geometry updates separately
                 return;
             }
             setClauses.push(`${key} = $${paramIndex}`);
@@ -643,11 +716,15 @@ app.put('/api/admin/co2-sources/:id', [
 
         const result = await pool.query(query, values);
 
-        // Log to audit table
-        await pool.query(`
-            INSERT INTO audit_log (table_name, record_id, action, old_values, new_values, user_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
-        `, ['co2_sources', id, 'UPDATE', JSON.stringify(oldRecord.rows[0]), JSON.stringify(updates), req.user.id]);
+        // Log to audit table if it exists
+        try {
+            await pool.query(`
+                INSERT INTO audit_log (table_name, record_id, action, old_values, new_values, user_id)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            `, ['co2_sources', id, 'UPDATE', JSON.stringify(oldRecord.rows[0]), JSON.stringify(updates), req.user.id]);
+        } catch (auditError) {
+            console.log('Audit logging not available:', auditError.message);
+        }
 
         res.json(result.rows[0]);
     } catch (error) {
@@ -669,11 +746,15 @@ app.delete('/api/admin/co2-sources/:id', adminLimiter, authenticateToken, async 
 
         await pool.query('DELETE FROM co2_sources WHERE id = $1', [id]);
 
-        // Log to audit table
-        await pool.query(`
-            INSERT INTO audit_log (table_name, record_id, action, old_values, user_id)
-            VALUES ($1, $2, $3, $4, $5)
-        `, ['co2_sources', id, 'DELETE', JSON.stringify(oldRecord.rows[0]), req.user.id]);
+        // Log to audit table if it exists
+        try {
+            await pool.query(`
+                INSERT INTO audit_log (table_name, record_id, action, old_values, user_id)
+                VALUES ($1, $2, $3, $4, $5)
+            `, ['co2_sources', id, 'DELETE', JSON.stringify(oldRecord.rows[0]), req.user.id]);
+        } catch (auditError) {
+            console.log('Audit logging not available:', auditError.message);
+        }
 
         res.json({ message: 'CO2 source deleted successfully' });
     } catch (error) {
@@ -721,33 +802,6 @@ app.post('/api/admin/optimize-database', adminLimiter, authenticateToken, async 
             }
         }
 
-        // Vacuum analyze for frequently updated tables
-        const frequentTables = ['co2_sources', 'voting_districts', 'audit_log'];
-        for (const table of frequentTables) {
-            try {
-                await pool.query(`VACUUM ANALYZE ${table}`);
-                optimizations.push(`Vacuumed and analyzed ${table}`);
-            } catch (error) {
-                optimizations.push(`Failed to vacuum ${table}: ${error.message}`);
-            }
-        }
-
-        // Update geometry validity flags
-        try {
-            await pool.query('SELECT update_geometry_validity()');
-            optimizations.push('Updated geometry validity flags');
-        } catch (error) {
-            optimizations.push(`Failed to update geometry validity: ${error.message}`);
-        }
-
-        // Create simplified geometries if function exists
-        try {
-            await pool.query('SELECT create_simplified_geometries()');
-            optimizations.push('Created simplified geometries');
-        } catch (error) {
-            optimizations.push(`Simplified geometries: ${error.message}`);
-        }
-
         res.json({ 
             message: 'Database optimization completed',
             optimizations
@@ -758,23 +812,7 @@ app.post('/api/admin/optimize-database', adminLimiter, authenticateToken, async 
     }
 });
 
-// Data import trigger endpoint
-app.post('/api/admin/import-data', adminLimiter, authenticateToken, async (req, res) => {
-    try {
-        // This would typically trigger a background job
-        // For now, return a success message
-        res.json({ 
-            message: 'Data import started',
-            status: 'started',
-            timestamp: new Date().toISOString()
-        });
-    } catch (error) {
-        console.error('Error starting data import:', error);
-        res.status(500).json({ error: 'Failed to start data import' });
-    }
-});
-
-// Get audit log
+// Get audit log if table exists
 app.get('/api/admin/audit-log', adminLimiter, authenticateToken, async (req, res) => {
     try {
         const { limit = 100, offset = 0, table_name } = req.query;
@@ -811,6 +849,10 @@ app.get('/', (req, res) => {
 
 // Catch-all handler for SPA routing
 app.get('*', (req, res) => {
+    // Don't serve index.html for API routes
+    if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: 'API endpoint not found' });
+    }
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
@@ -826,48 +868,78 @@ app.use((error, req, res, next) => {
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
-    process.exit(1);
+    if (process.env.NODE_ENV === 'production') {
+        // Log error but don't exit in production
+        console.error('Application will continue running...');
+    } else {
+        process.exit(1);
+    }
 });
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    if (process.env.NODE_ENV === 'production') {
+        console.error('Application will continue running...');
+    }
 });
 
 // Graceful shutdown
-const gracefulShutdown = () => {
-    console.log('Received kill signal, shutting down gracefully...');
+const gracefulShutdown = (signal) => {
+    console.log(`Received ${signal}, shutting down gracefully...`);
     pool.end(() => {
         console.log('Database pool closed');
         process.exit(0);
     });
+    
+    // Force exit after 30 seconds
+    setTimeout(() => {
+        console.error('Could not close connections in time, forcefully shutting down');
+        process.exit(1);
+    }, 30000);
 };
 
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`
+// Start server with enhanced logging
+const startServer = async () => {
+    try {
+        await testDatabaseConnection();
+        
+        app.listen(PORT, '0.0.0.0', () => {
+            console.log(`
+========================================
 🚀 CO₂ Storage Atlas Server Started
 ========================================
 Environment: ${process.env.NODE_ENV || 'development'}
 Port: ${PORT}
-Database: ${process.env.DB_NAME}
-Host: ${process.env.DB_HOST}:${process.env.DB_PORT}
+Database: ${process.env.DB_NAME || 'co2_storage_atlas'}
+Host: ${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || 5432}
 JWT Secret: ${process.env.JWT_SECRET ? 'Configured' : 'Using default'}
+SSL: ${process.env.NODE_ENV === 'production' ? 'Enabled' : 'Disabled'}
 ========================================
 Features:
 - Performance optimized queries
-- Clustering support
-- Area filtering
-- Admin authentication
-- Audit logging
-- Rate limiting
-- PostgreSQL optimization
+- Clustering support with bbox filtering
+- Area filtering for large datasets
+- Admin authentication with JWT
+- Rate limiting for security
+- PostgreSQL with PostGIS
+- Production-ready error handling
+- Graceful shutdown handling
 ========================================
-Open http://localhost:${PORT} to view the application
-    `);
-});
+Health Check: /api/health
+Main App: ${process.env.NODE_ENV === 'production' ? 'https://your-app.onrender.com' : `http://localhost:${PORT}`}
+========================================
+            `);
+        });
+    } catch (error) {
+        console.error('Failed to start server:', error);
+        process.exit(1);
+    }
+};
+
+startServer();
 
 module.exports = app;
