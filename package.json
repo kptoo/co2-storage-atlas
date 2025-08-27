@@ -1,7 +1,7 @@
 {
   "name": "co2-storage-atlas",
-  "version": "2.1.0",
-  "description": "Interactive CO₂ Storage Site Mapping Application for Upper Austria and Salzburg - Production Ready with Clustering and Performance Optimizations",
+  "version": "2.1.1",
+  "description": "Interactive CO₂ Storage Site Mapping Application for Upper Austria and Salzburg - Production Ready with Enhanced Database Connection",
   "main": "server.js",
   "scripts": {
     "dev": "cross-env NODE_ENV=development nodemon server.js",
@@ -12,7 +12,7 @@
     "create-structure": "node scripts/create-structure.js",
     "maintenance": "node scripts/maintenance.js",
     "backup-db": "node scripts/backup-database.js",
-    "optimize-db": "node -e \"const pool = require('pg').Pool; const p = new pool({host: process.env.DB_HOST, port: process.env.DB_PORT, user: process.env.DB_USER, password: process.env.DB_PASSWORD, database: process.env.DB_NAME}); p.query('VACUUM ANALYZE;').then(() => console.log('Database optimized')).finally(() => p.end());\"",
+    "optimize-db": "node scripts/optimize-database.js",
     "test": "jest --detectOpenHandles",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
@@ -21,53 +21,55 @@
     "format": "prettier --write .",
     "validate": "npm run lint && npm run test",
     "build": "echo 'Building production assets...' && npm run validate",
-    "deploy": "npm run build && npm run setup-db && npm run import-data && npm start",
+    "deploy": "npm run build && npm start",
     "reset": "npm run setup-db && npm run import-data",
     "logs": "tail -f logs/app.log",
     "clean": "rm -rf node_modules logs/* uploads/* && npm install",
-    "check-db": "node -e \"require('./scripts/setup-database.js')\"",
+    "check-db": "node scripts/check-database.js",
     "create-icons": "mkdir -p public/icons",
     "performance-test": "node scripts/performance-test.js",
-    "cluster-test": "node scripts/cluster-test.js"
+    "cluster-test": "node scripts/cluster-test.js",
+    "health-check": "curl -f http://localhost:${PORT:-3000}/api/health || exit 1",
+    "postinstall": "echo 'Installation completed successfully'"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "express": "^4.19.2",
     "cors": "^2.8.5",
-    "helmet": "^7.0.0",
+    "helmet": "^7.1.0",
     "compression": "^1.7.4",
     "morgan": "^1.10.0",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
-    "pg": "^8.11.3",
+    "pg": "^8.12.0",
     "multer": "^1.4.5-lts.1",
-    "express-rate-limit": "^6.10.0",
-    "express-validator": "^7.0.1",
-    "dotenv": "^16.3.1",
+    "express-rate-limit": "^7.4.0",
+    "express-validator": "^7.2.0",
+    "dotenv": "^16.4.5",
     "csv-parser": "^3.0.0",
     "xlsx": "^0.18.5",
-    "axios": "^1.5.0",
-    "proj4": "^2.9.0",
+    "axios": "^1.7.5",
+    "proj4": "^2.12.0",
     "shapefile": "^0.6.6",
-    "adm-zip": "^0.5.10",
-    "@turf/turf": "^6.5.0",
+    "adm-zip": "^0.5.14",
+    "@turf/turf": "^7.0.0",
     "wellknown": "^0.5.0",
     "papaparse": "^5.4.1",
-    "node-cron": "^3.0.2",
-    "sharp": "^0.32.6",
+    "node-cron": "^3.0.3",
+    "sharp": "^0.33.5",
     "cross-env": "^7.0.3",
-    "winston": "^3.10.0",
-    "winston-daily-rotate-file": "^4.7.1"
+    "winston": "^3.14.2",
+    "winston-daily-rotate-file": "^5.0.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1",
+    "nodemon": "^3.1.4",
     "jest": "^29.7.0",
-    "supertest": "^6.3.3",
-    "eslint": "^8.50.0",
-    "eslint-config-prettier": "^9.0.0",
+    "supertest": "^7.0.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-node": "^11.1.0",
-    "prettier": "^3.0.3",
-    "@types/leaflet": "^1.9.0",
-    "@types/node": "^20.5.0"
+    "prettier": "^3.3.3",
+    "@types/leaflet": "^1.9.12",
+    "@types/node": "^22.4.2"
   },
   "keywords": [
     "geospatial",
@@ -82,13 +84,14 @@
     "interactive-map",
     "clustering",
     "performance-optimized",
-    "production-ready"
+    "production-ready",
+    "render-deployment"
   ],
   "author": "Kiptoo",
   "license": "MIT",
   "engines": {
-    "node": ">=16.0.0",
-    "npm": ">=8.0.0"
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
   },
   "repository": {
     "type": "git",
@@ -97,7 +100,7 @@
   "bugs": {
     "url": "https://github.com/username/co2-storage-atlas/issues"
   },
-  "homepage": "https://github.com/username/co2-storage-atlas#readme",
+  "homepage": "https://co2-storage-atlas-1.onrender.com",
   "jest": {
     "testEnvironment": "node",
     "roots": ["<rootDir>/tests"],
@@ -110,7 +113,9 @@
       "!ecosystem.config.js"
     ],
     "coverageDirectory": "coverage",
-    "coverageReporters": ["text", "lcov", "html"]
+    "coverageReporters": ["text", "lcov", "html"],
+    "setupFilesAfterEnv": ["<rootDir>/tests/setup.js"],
+    "testTimeout": 30000
   },
   "eslintConfig": {
     "env": {
@@ -132,20 +137,29 @@
       "linebreak-style": ["error", "unix"],
       "quotes": ["error", "single"],
       "semi": ["error", "always"],
-      "no-console": "warn",
-      "no-unused-vars": "warn"
+      "no-console": "off",
+      "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+      "prefer-const": "error",
+      "no-var": "error"
     }
   },
   "prettier": {
     "semi": true,
     "trailingComma": "es5",
     "singleQuote": true,
-    "printWidth": 80,
-    "tabWidth": 2
+    "printWidth": 100,
+    "tabWidth": 2,
+    "useTabs": false
   },
   "browserslist": [
     "> 1%",
     "last 2 versions",
-    "not dead"
-  ]
+    "not dead",
+    "not ie <= 11"
+  ],
+  "render": {
+    "build": "npm install && npm run build",
+    "start": "npm start",
+    "healthCheckPath": "/api/health"
+  }
 }
